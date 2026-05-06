@@ -1,0 +1,25 @@
+# ===== DATA =====
+detection/
+output/
+
+# ===== MODELS =====
+PipelineMOT/models/
+*.pth
+*.pt
+
+# ===== MEDIA =====
+*.mp4
+*.avi
+*.jpg
+*.png
+
+# ===== PYTHON =====
+__pycache__/
+*.pyc
+
+# ===== NOTEBOOK =====
+.ipynb_checkpoints/
+
+# ===== OS =====
+.DS_Store
+Thumbs.db
