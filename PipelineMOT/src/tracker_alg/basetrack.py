@@ -1,17 +1,22 @@
 """
-Abstract Class, chỉ quản lý State, track_id, trạng thái, history của track
+basetrack.py
+------------
+Abstract class quản lý State, track_id, trạng thái của track.
 
-FIX v2:
-- time_since_update là class variable → đổi thành instance variable,
-  tự tăng khi predict(), reset về 0 khi update()/activate()/re_activate()
-- end_frame property giữ nguyên (return self.frame_id là đúng)
-- clear_count() reset _count về 0 để dùng lại giữa các pipeline
+Gộp từ 2 version:
+  - Version bạn   : time_since_update là INSTANCE variable (đúng hơn)
+  - Version leader : thêm mark_long_lost(), clear_count()
+
+Fix:
+  - time_since_update là instance variable → mỗi track có counter riêng
+  - clear_count() reset _count về 0 để dùng lại giữa các pipeline
 """
+
 import numpy as np
 from collections import OrderedDict
 
 
-class TrackState(object):
+class TrackState:
     New      = 0
     Tracked  = 1
     Lost     = 2
@@ -19,7 +24,7 @@ class TrackState(object):
     Removed  = 4
 
 
-class BaseTrack(object):
+class BaseTrack:
     _count = 0
 
     track_id     = 0
@@ -33,22 +38,29 @@ class BaseTrack(object):
     start_frame  = 0
     frame_id     = 0
 
-    # multi-camera
+    # multi-camera (không dùng trong project này)
     location = (np.inf, np.inf)
 
     def __init__(self):
-        # FIX: time_since_update là INSTANCE variable, không phải class variable
-        # Mỗi track có counter riêng, tăng sau mỗi predict(), reset khi được update
+        # INSTANCE variable — mỗi track có counter riêng
+        # tăng sau mỗi predict(), reset về 0 khi update/activate/re_activate
         self.time_since_update = 0
 
     @property
-    def end_frame(self):
+    def end_frame(self) -> int:
         return self.frame_id
 
     @staticmethod
-    def next_id():
+    def next_id() -> int:
         BaseTrack._count += 1
         return BaseTrack._count
+
+    @staticmethod
+    def clear_count():
+        """Reset ID counter — gọi khi bắt đầu pipeline mới."""
+        BaseTrack._count = 0
+
+    # ── Abstract methods ────────────────────────────────────
 
     def activate(self, *args):
         raise NotImplementedError
@@ -59,6 +71,8 @@ class BaseTrack(object):
     def update(self, *args, **kwargs):
         raise NotImplementedError
 
+    # ── State transitions ───────────────────────────────────
+
     def mark_lost(self):
         self.state = TrackState.Lost
 
@@ -67,7 +81,3 @@ class BaseTrack(object):
 
     def mark_removed(self):
         self.state = TrackState.Removed
-
-    @staticmethod
-    def clear_count():
-        BaseTrack._count = 0

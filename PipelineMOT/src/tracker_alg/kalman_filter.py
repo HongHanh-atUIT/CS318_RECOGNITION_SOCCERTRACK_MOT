@@ -166,3 +166,82 @@ class KalmanFilter(object):
             cholesky_factor, d.T, lower=True,
             check_finite=False, overwrite_b=True)
         return np.sum(z * z, axis=0)
+
+
+# ─────────────────────────────────────────────────────────────
+# KalmanFilterNew — dùng cho OC-SORT (new_kf=True)
+# State space: [x, y, w, h, vx, vy, vw, vh]
+# Adaptive process/measurement noise theo box size
+# ─────────────────────────────────────────────────────────────
+
+class KalmanFilterNew:
+    """
+    Kalman Filter với state space [x, y, w, h] cho OC-SORT.
+
+    Khác KalmanFilter chuẩn:
+    - State dùng (w, h) thay vì (aspect_ratio, h)
+    - Process noise Q và measurement noise R được tính adaptive
+      theo kích thước box hiện tại (xem new_kf_process_noise / new_kf_measurement_noise)
+    - Được gọi từ KalmanBoxTracker trong ocsort.py khi new_kf=True
+
+    Interface tương thích filterpy.kalman.KalmanFilter:
+      self.x, self.P, self.F, self.H, self.R, self.Q
+      .predict(Q=None), .update(z, R=None)
+    """
+
+    def __init__(self, dim_x: int, dim_z: int):
+        self.dim_x = dim_x
+        self.dim_z = dim_z
+
+        self.x = np.zeros((dim_x, 1))       # state vector
+        self.P = np.eye(dim_x)              # covariance
+        self.Q = np.eye(dim_x)              # process noise
+        self.F = np.eye(dim_x)              # state transition
+        self.H = np.zeros((dim_z, dim_x))  # observation model
+        self.R = np.eye(dim_z)              # measurement noise
+
+        self._I = np.eye(dim_x)
+
+    def predict(self, F=None, Q=None):
+        """Prediction step — dùng F, Q từ argument hoặc self."""
+        if F is None:
+            F = self.F
+        if Q is None:
+            Q = self.Q
+        self.x = F @ self.x
+        self.P = F @ self.P @ F.T + Q
+
+    def update(self, z, R=None, H=None):
+        """
+        Update step.
+        z = None → bỏ qua update (track bị lost)
+        """
+        if z is None:
+            return
+
+        if R is None:
+            R = self.R
+        if H is None:
+            H = self.H
+
+        z = np.atleast_2d(z)
+        if z.shape == (1, self.dim_z):
+            z = z.T
+
+        y   = z - H @ self.x
+        S   = H @ self.P @ H.T + R
+        K   = self.P @ H.T @ np.linalg.inv(S)
+        self.x = self.x + K @ y
+        I_KH   = self._I - K @ H
+        self.P = I_KH @ self.P @ I_KH.T + K @ R @ K.T
+
+    def md_for_measurement(self, z) -> float:
+        """Mahalanobis distance — dùng sau predict()."""
+        z   = np.atleast_2d(z)
+        if z.shape == (1, self.dim_z):
+            z = z.T
+        H   = self.H
+        S   = H @ self.P @ H.T + self.R
+        y   = z - H @ self.x
+        md  = float(np.sqrt(y.T @ np.linalg.inv(S) @ y))
+        return md
