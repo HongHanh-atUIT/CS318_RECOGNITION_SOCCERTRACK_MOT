@@ -1,6 +1,7 @@
 # ===== DATA =====
 detection/
 output/
+Data/
 
 # ===== MODELS =====
 PipelineMOT/models/

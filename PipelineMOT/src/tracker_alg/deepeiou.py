@@ -323,13 +323,13 @@ def remove_duplicate_stracks(stracksa, stracksb, iou_thresh=0.85):
 # ------- Main class -------------------------------------------------
 class DeepEIoU:
     def __init__(self,
-                 track_high_thresh: float = 0.60,     # thresh cho các box vào first association (chặn dưới)
+                 track_high_thresh: float = 0.65,     # thresh cho các box vào first association (chặn dưới)
                  track_low_thresh: float = 0.1,       # thres cho low score box (chặn dưới)
                  new_track_thresh: float = 0.65,       # thres để tạo track mới
-                 track_buffer: int = 60,              # vùng đệm, sau khi lost bằng này thì xóa track
-                 match_thresh: float = 0.8,           # thresh cho first association
+                 track_buffer: int = 30,              # vùng đệm, sau khi lost bằng này thì xóa track
+                 match_thresh: float = 0.7,           # thresh cho first association
                  proximity_thresh: float = 0.7,       # thres về IOU trong stage 1
-                 appearance_thresh: float = 0.25,     # appearance_thresh 
+                 appearance_thresh: float = 0.25,     # appearance_thresh (đã /2)
                  with_reid: bool = True):
 
         self.tracked_stracks: List[STrack] = []

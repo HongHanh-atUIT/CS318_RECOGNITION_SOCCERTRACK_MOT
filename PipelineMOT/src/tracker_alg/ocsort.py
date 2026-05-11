@@ -168,16 +168,17 @@ def compute_aw_max_metric(emb_cost, w_association_emb, bottom=0.5):
     Tính Adaptive Weighting (AW) cho embedding cost.
     Weight của embedding được scale down nếu 2 candidate tốt nhất quá gần nhau
     (tức embedding không đủ discriminative để phân biệt).
+    Code implement khác paper, dùng chia thay hiệu
  
     Args:
         emb_cost         (np.array): Ma trận embedding similarity shape (M, N).
         w_association_emb   (float): Weight ban đầu cho embedding.
-        bottom              (float): Cut off weight.
+        bottom              (float): Cut off weight, càng cao thì trọng số cho emb càng lớn
  
     Returns:
         np.array: Ma trận embedding cost đã được adaptive-weight, shape (M, N).
     """
-    w_emb = np.full_like(emb_cost, w_association_emb)
+    w_emb = np.full_like(emb_cost, w_association_emb)   #fill full aw
 
     for idx in range(emb_cost.shape[0]):
         inds = np.argsort(-emb_cost[idx])
@@ -642,13 +643,13 @@ class OCSort(object):
         det_thresh = 0.3,
         use_emb = True,
         max_age=30,
-        min_hits=3,
+        min_hits=5,
         iou_threshold=0.3,
         delta_t=3,
-        inertia=0.2,
-        w_association_emb=0.75,
-        alpha_fixed_emb=0.95,
-        aw_param=0.5,
+        inertia=0.25,    #lamda trong cost(iou) + lamda*cost(velocity)
+        w_association_emb=0.75, # weight embed khởi tạo (a_w), nếu không dùng AW, tính cost(ocsort) + w_association_emb*emb
+        alpha_fixed_emb=0.95,   #fixed alpha trong EMA, càng lớn càng ưu tiên lịch sử
+        aw_param=0.4,   #epsilon, càng cao càng dễ dãi với tỉ lệ top2/top1 -> weight càng có thể lớn
         aw_off=False,
         new_kf_off=False,
     ):
@@ -668,7 +669,8 @@ class OCSort(object):
                                       Càng lớn → velocity ổn định hơn nhưng lag hơn.
             inertia          (float): Weight của velocity direction cost trong Round 1 (vdc_weight).
                                       Càng cao → ưu tiên tracker đi đúng hướng dự đoán.
-            w_association_emb(float): Weight ban đầu cho embedding cost trong association.
+            w_association_emb(float): Weight ban đầu cho embedding cost trong association. Nếu không dùng AW thì weight giữ nguyên.
+                                      Ngược lại, sẽ giảm dần nếu embedding không đủ phân biệt.
             alpha_fixed_emb  (float): Hệ số EMA cố định khi update embedding.
                                       Giá trị cao → giữ embedding lịch sử nhiều hơn.
             aw_param         (float): Tham số `bottom` của Adaptive Weighting.
@@ -687,7 +689,7 @@ class OCSort(object):
         self.inertia = inertia          # OCM quán tính
         self.w_association_emb = w_association_emb  # aw + wb
         self.alpha_fixed_emb = alpha_fixed_emb  # fixed alpha trong smooth embed
-        self.aw_param = aw_param        #aw
+        self.aw_param = aw_param        #epsilon
         self.use_emb = use_emb
         KalmanBoxTracker.count = 0
         
@@ -748,7 +750,7 @@ class OCSort(object):
             trust = (dets[:, 4] - self.det_thresh) / (1 - self.det_thresh)
             af = self.alpha_fixed_emb
             # From [alpha_fixed_emb, 1], goes to 1 as detector is less confident
-            dets_alpha = af + (1 - af) * (1 - trust)
+            dets_alpha = af + (1 - af) * (1 - trust)    #alpha_t
 
         # Get predicted locations from existing trackers
         trks = np.zeros((len(self.trackers), 5))
@@ -798,7 +800,7 @@ class OCSort(object):
             self.aw_off,
             self.aw_param,
         )
-        for m in matched:
+        for m in matched:   #[[det, track],...]
             self.trackers[m[1]].update(dets[m[0], :])
             if self.use_emb:
                 self.trackers[m[1]].update_emb(dets_embs[m[0]], alpha=dets_alpha[m[0]])
