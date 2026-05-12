@@ -1,6 +1,7 @@
 # ===== DATA =====
 detection/
 output/
+Output/
 Data/
 
 # ===== MODELS =====

@@ -5,6 +5,9 @@ Adopted from the SORT script by Alex Bewley (alex@bewley.ai), refactored from De
 Pipeline:
     - Input mỗi frame: list of dict [{'tlbr', 'score', 'feat'}, ...]
     - Output mỗi frame: list of STrack, mỗi STrack chứa tlbr và track_id
+    
+[TODO]: Định nghĩa hàm convert_bbox_to_z_new: biến đổi từ [x1,y1,x2,y2] sang [x,y] của pitch
+        và convert_x_to_bbox_new: giống inverse_homography biến đổi từ [x,y] của pitch sang [x1,y1,x2,y2]
 """
 
 import numpy as np
@@ -54,29 +57,6 @@ def iou_batch(bboxes1, bboxes2):
     )
     return o
 
-def ct_dist(bboxes1, bboxes2):
-    """
-    Tính ma trận chi phí dựa trên khoảng cách tâm (centre-to-centre) giữa hai tập boxes.
-    Giá trị càng cao = hai tâm càng gần nhau (đã normalize về [0, 1]).
- 
-    Args:
-        bboxes1 (np.array): Shape (M, 4), định dạng [x1, y1, x2, y2].
-        bboxes2 (np.array): Shape (N, 4), định dạng [x1, y1, x2, y2].
- 
-    Returns:
-        np.array: Ma trận chi phí shape (M, N), giá trị trong [0, 1].
-    """
-    bboxes2 = np.expand_dims(bboxes2, 0)
-    bboxes1 = np.expand_dims(bboxes1, 1)
-
-    cx1 = (bboxes1[..., 0] + bboxes1[..., 2]) / 2.0
-    cy1 = (bboxes1[..., 1] + bboxes1[..., 3]) / 2.0
-    cx2 = (bboxes2[..., 0] + bboxes2[..., 2]) / 2.0
-    cy2 = (bboxes2[..., 1] + bboxes2[..., 3]) / 2.0
-    ct_dist = np.sqrt((cx1 - cx2) ** 2 + (cy1 - cy2) ** 2)
-
-    ct_dist = ct_dist / ct_dist.max()
-    return ct_dist.max() - ct_dist  #[0, 1]
 
 
 def linear_assignment(cost_matrix):
@@ -99,69 +79,6 @@ def linear_assignment(cost_matrix):
 
         x, y = linear_sum_assignment(cost_matrix)
         return np.array(list(zip(x, y)))
-
-
-def associate_detections_to_trackers(detections, trackers, iou_threshold=0.3):
-    """
-    Gán detections vào trackers chỉ dựa trên IoU (không dùng embedding).
-    Dùng trong các bước association đơn giản hoặc fallback.
- 
-    Args:
-        detections   (np.array): Shape (M, 4+), định dạng [x1, y1, x2, y2, ...].
-        trackers     (np.array): Shape (N, 4+), định dạng [x1, y1, x2, y2, ...].
-        iou_threshold   (float): Ngưỡng IoU tối thiểu để chấp nhận một match.
- 
-    Returns:
-        matches             (np.array): Shape (K, 2) — [det_idx, trk_idx].
-        unmatched_detections(np.array): Indices của detections không được match.
-        unmatched_trackers  (np.array): Indices của trackers không được match.
-    """
-    if len(trackers) == 0:
-        return (
-            np.empty((0, 2), dtype=int),
-            np.arange(len(detections)),
-            np.empty((0, 5), dtype=int),
-        )
-
-    iou_matrix = iou_batch(detections, trackers)
-
-    if min(iou_matrix.shape) > 0:
-        a = (iou_matrix > iou_threshold).astype(np.int32)
-        if a.sum(1).max() == 1 and a.sum(0).max() == 1:
-            matched_indices = np.stack(np.where(a), axis=1)
-        else:
-            matched_indices = linear_assignment(-iou_matrix)
-    else:
-        matched_indices = np.empty(shape=(0, 2))
-
-    unmatched_detections = []
-    for d, _ in enumerate(detections):
-        if d not in matched_indices[:, 0]:
-            unmatched_detections.append(d)
-    unmatched_trackers = []
-    for t, _ in enumerate(trackers):
-        if t not in matched_indices[:, 1]:
-            unmatched_trackers.append(t)
-
-    # Lọc matched với low IOU -> Dù match với score cao nhưng IOU thấp cũng loại
-    matches = []
-    for m in matched_indices:
-        if iou_matrix[m[0], m[1]] < iou_threshold:
-            unmatched_detections.append(m[0])
-            unmatched_trackers.append(m[1])
-        else:
-            matches.append(m.reshape(1, 2))
-
-    if len(matches) == 0:
-        matches = np.empty((0, 2), dtype=int)
-    else:
-        matches = np.concatenate(matches, axis=0)
-
-    return (
-        matches,
-        np.array(unmatched_detections),
-        np.array(unmatched_trackers),
-    )
 
 def compute_aw_max_metric(emb_cost, w_association_emb, bottom=0.5):
     """
@@ -203,6 +120,102 @@ def compute_aw_max_metric(emb_cost, w_association_emb, bottom=0.5):
         w_emb[:, idj] *= col_weight
 
     return w_emb * emb_cost
+
+def associate_euclidean(
+    detections, trackers, distance_threshold, velocities, previous_obs, vdc_weight, emb_cost, w_assoc_emb, aw_off, aw_param
+):
+    """
+    Association Round 1 dùng Euclidean distance thay IoU — cho trường hợp new_kf=True.
+    Returns:
+        matches             (np.array): Shape (K, 2) — [det_idx, trk_idx].
+        unmatched_detections(np.array): Indices detections không được match.
+        unmatched_trackers  (np.array): Indices trackers không được match.
+    """
+    if len(trackers) == 0:
+        return (
+            np.empty((0, 2), dtype=int),
+            np.arange(len(detections)),
+            np.empty((0, 5), dtype=int),
+        )
+
+    # Tính velocity direction dùng bottom center
+    Y, X = speed_direction_batch(detections, previous_obs)
+    inertia_Y, inertia_X = velocities[:, 0], velocities[:, 1]
+    inertia_Y = np.repeat(inertia_Y[:, np.newaxis], Y.shape[1], axis=1)
+    inertia_X = np.repeat(inertia_X[:, np.newaxis], X.shape[1], axis=1)
+    diff_angle_cos = inertia_X * X + inertia_Y * Y
+    diff_angle_cos = np.clip(diff_angle_cos, a_min=-1, a_max=1)
+    diff_angle = np.arccos(diff_angle_cos)
+    diff_angle = (np.pi / 2.0 - np.abs(diff_angle)) / np.pi
+
+    valid_mask = np.ones(previous_obs.shape[0])
+    valid_mask[np.where(previous_obs[:, 4] < 0)] = 0
+
+    # Euclidean distance thay IoU
+    # dets: bottom center = ((x1+x2)/2, y2)
+    # trks: x,y từ KF predict = (trks[:,0], trks[:,1])
+    det_centers = np.stack([
+        (detections[:, 0] + detections[:, 2]) / 2.0,  # cx
+        detections[:, 3]                               # y2 = bottom
+    ], axis=1)  # (M, 2)
+    trk_centers = trackers[:, :2]  # (N, 2) — x,y từ [x,y,x,y,0]
+
+    from scipy.spatial.distance import cdist
+    dist_matrix = cdist(det_centers, trk_centers, metric='euclidean')  # (M, N) >=0
+
+    # dùng negative distance để Hungarian minimize → maximize similarity
+    scores = np.repeat(detections[:, -1][:, np.newaxis], trackers.shape[0], axis=1)
+    valid_mask = np.repeat(valid_mask[:, np.newaxis], X.shape[1], axis=1)
+
+    angle_diff_cost = (valid_mask * diff_angle) * vdc_weight
+    angle_diff_cost = angle_diff_cost.T
+    angle_diff_cost = angle_diff_cost * scores
+
+    if min(dist_matrix.shape) > 0:
+        a = (dist_matrix < distance_threshold).astype(np.int32)
+        if a.sum(1).max() == 1 and a.sum(0).max() == 1:
+            matched_indices = np.stack(np.where(a), axis=1)
+        else:
+            if emb_cost is None:
+                emb_cost = 0
+            else:
+                emb_cost[dist_matrix >= distance_threshold] = 0  # gating
+                if not aw_off:
+                    emb_cost = compute_aw_max_metric(emb_cost, w_assoc_emb, bottom=aw_param)
+                else:
+                    emb_cost *= w_assoc_emb
+
+            # đổi về similarity để nhất quán logic optimize trong hungarian matching
+            similarity_matrix = 1 - np.clip(dist_matrix / distance_threshold, 0, 1)  # [0,1]
+            final_cost = -(similarity_matrix + angle_diff_cost + emb_cost)
+            matched_indices = linear_assignment(final_cost)
+    else:
+        matched_indices = np.empty(shape=(0, 2))
+
+    unmatched_detections = []
+    for d in range(len(detections)):
+        if d not in matched_indices[:, 0]:
+            unmatched_detections.append(d)
+    unmatched_trackers = []
+    for t in range(len(trackers)):
+        if t not in matched_indices[:, 1]:
+            unmatched_trackers.append(t)
+
+    # Filter out matched với distance quá lớn
+    matches = []
+    for m in matched_indices:
+        if dist_matrix[m[0], m[1]] >= distance_threshold:
+            unmatched_detections.append(m[0])
+            unmatched_trackers.append(m[1])
+        else:
+            matches.append(m.reshape(1, 2))
+
+    if len(matches) == 0:
+        matches = np.empty((0, 2), dtype=int)
+    else:
+        matches = np.concatenate(matches, axis=0)
+
+    return matches, np.array(unmatched_detections), np.array(unmatched_trackers)
 
 
 def associate(
@@ -331,7 +344,7 @@ def speed_direction_batch(dets, tracks):
 
 
 # =============================================================================
-# Utility functions
+# Utility functions cho KalmanBoxTracker
 # =============================================================================
 
 def k_previous_obs(observations, cur_age, k):
@@ -358,73 +371,6 @@ def k_previous_obs(observations, cur_age, k):
     return observations[max_age]
 
 
-def convert_bbox_to_z(bbox):
-    """
-    Chuyển bbox [x1, y1, x2, y2] sang state vector [x, y, s, r] cho Kalman filter cũ.
- 
-    Args:
-        bbox (array-like): [x1, y1, x2, y2].
- 
-    Returns:
-        np.array: Shape (4, 1) — [x_center, y_center, area, aspect_ratio].
-    """
-    w = bbox[2] - bbox[0]
-    h = bbox[3] - bbox[1]
-    x = bbox[0] + w / 2.0
-    y = bbox[1] + h / 2.0
-    s = w * h
-    r = w / float(h + 1e-6)
-    return np.array([x, y, s, r]).reshape((4, 1))
-
-
-def convert_bbox_to_z_new(bbox):
-    """
-    Chuyển bbox [x1, y1, x2, y2] sang state vector [x, y, w, h] cho Kalman filter mới.
- 
-    Args:
-        bbox (array-like): [x1, y1, x2, y2].
- 
-    Returns:
-        np.array: Shape (4, 1) — [x_center, y_center, width, height].
-    """
-    w = bbox[2] - bbox[0]
-    h = bbox[3] - bbox[1]
-    x = bbox[0] + w / 2.0
-    y = bbox[1] + h / 2.0
-    return np.array([x, y, w, h]).reshape((4, 1))
-
-
-def convert_x_to_bbox_new(x):
-    """
-    Chuyển state vector [x_center, y_center, w, h] sang bbox [x1, y1, x2, y2].
-    Dùng với Kalman filter mới (new_kf=True).
- 
-    Args:
-        x (np.array): State vector, ít nhất 4 phần tử đầu là [x, y, w, h].
- 
-    Returns:
-        np.array: Shape (1, 4) — [x1, y1, x2, y2].
-    """
-    x, y, w, h = x.reshape(-1)[:4] 
-    return np.array([x - w / 2, y - h / 2, x + w / 2, y + h / 2]).reshape(1, 4)
-
-
-def convert_x_to_bbox(x, score=None):
-    """
-    [x,y,s,r] → [x1,y1,x2,y2]
-    """
-    w = np.sqrt(x[2] * x[3])
-    h = x[2] / w
-    if score is None:
-        return np.array(
-            [x[0] - w / 2.0, x[1] - h / 2.0, x[0] + w / 2.0, x[1] + h / 2.0]
-        ).reshape((1, 4))
-    else:
-        return np.array(
-            [x[0] - w / 2.0, x[1] - h / 2.0, x[0] + w / 2.0, x[1] + h / 2.0, score]
-        ).reshape((1, 5))
-
-
 def speed_direction(bbox1, bbox2):
     cx1, cy1 = (bbox1[0] + bbox1[2]) / 2.0, (bbox1[1] + bbox1[3]) / 2.0
     cx2, cy2 = (bbox2[0] + bbox2[2]) / 2.0, (bbox2[1] + bbox2[3]) / 2.0
@@ -433,27 +379,43 @@ def speed_direction(bbox1, bbox2):
     return speed / norm
 
 
-def new_kf_process_noise(w, h, p=1 / 20, v=1 / 160):
-    Q = np.diag(
-        (
-            (p * w) ** 2,
-            (p * h) ** 2,
-            (p * w) ** 2,
-            (p * h) ** 2,
-            (v * w) ** 2,
-            (v * h) ** 2,
-            (v * w) ** 2,
-            (v * h) ** 2,
-        )
-    )
-    return Q
+def convert_bbox_to_z(bbox):
+    """
+    Chuyển bbox [x1, y1, x2, y2] sang state vector [x, y, s, r] khi new_kf = False.
+    với x, y là tâm box, s là w*h, r là w/h
+    """
+    w = bbox[2] - bbox[0]
+    h = bbox[3] - bbox[1]
+    x = bbox[0] + w/2.
+    y = bbox[1] + h/2.
+    s = w * h  # scale is just area
+    r = w / float(h+1e-6)
+    return np.array([x, y, s, r]).reshape((4, 1))
 
+def convert_x_to_bbox(x):
+    """
+    Chuyển state vector [x_center, y_center, s, r] sang bbox [x1, y1, x2, y2] khi new_kf = False
+    """
+    w = np.sqrt(x[2] * x[3])
+    h = x[2] / w
+    return np.array([x[0]-w/2., x[1]-h/2., x[0]+w/2., x[1]+h/2.]).reshape((1, 4))
 
-def new_kf_measurement_noise(w, h, m=1 / 20):
-    w_var = (m * w) ** 2
-    h_var = (m * h) ** 2
-    R = np.diag((w_var, h_var, w_var, h_var))
-    return R
+def convert_bbox_to_z_new(bbox):
+    """
+    Chuyển bbox [x1, y1, x2, y2] sang state vector [x, y] khi new_kf = True.
+    """
+    # import từ pitch localization
+    return np.array([0,0]).reshape((2, 1)) # toy data
+
+def convert_x_to_bbox_new(x):
+    """
+    Chuyển state vector [x, y] sang cx_bot, cy_bot new_kf = True
+    """
+    #cx_bot, cy_bot = convert_xy(x)     HÀM BIẾN ĐỔI TỪ X,Y TRÊN SÂN -> X, Y Ở GIỮA PHÍA DƯỚI TRÊN ẢNH
+    cx_bot, cy_bot = 5, 5 #placeholder
+    
+    return cx_bot, cy_bot
+
 
 
 # =============================================================================
@@ -467,50 +429,20 @@ class KalmanBoxTracker(object):
 
     count = 0
 
-    def __init__(self, bbox, delta_t=3, orig=False, emb=None, alpha=0, new_kf=False):
+    def __init__(self, bbox, delta_t=3, emb=None, alpha=0, new_kf=False):
         """
         Initialises a tracker using initial bounding box.
+        new_kf: false -> state dạng [x,y,s,r] trên trục hình ảnh
+                true -> state dạng [x,y] trên tọa độ pitch
         """
-        if not orig:
-            from .kalman_filter import KalmanFilterNew as KalmanFilter
-        else:
-            from filterpy.kalman import KalmanFilter
-
+        from .kalman_filter import KalmanFilterNew as KalmanFilter
         self.new_kf = new_kf
-        if new_kf:
-            self.kf = KalmanFilter(dim_x=8, dim_z=4)
-            self.kf.F = np.array(
-                [
-                    # x y w h x' y' w' h'
-                    [1, 0, 0, 0, 1, 0, 0, 0],
-                    [0, 1, 0, 0, 0, 1, 0, 0],
-                    [0, 0, 1, 0, 0, 0, 1, 0],
-                    [0, 0, 0, 1, 0, 0, 0, 1],
-                    [0, 0, 0, 0, 1, 0, 0, 0],
-                    [0, 0, 0, 0, 0, 1, 0, 0],
-                    [0, 0, 0, 0, 0, 0, 1, 0],
-                    [0, 0, 0, 0, 0, 0, 0, 1],
-                ]
-            )
-            self.kf.H = np.array(
-                [
-                    [1, 0, 0, 0, 0, 0, 0, 0],
-                    [0, 1, 0, 0, 0, 0, 0, 0],
-                    [0, 0, 1, 0, 0, 0, 0, 0],
-                    [0, 0, 0, 1, 0, 0, 0, 0],
-                ]
-            )
-            _, _, w, h = convert_bbox_to_z_new(bbox).reshape(-1)
-            self.kf.P = new_kf_process_noise(w, h)
-            self.kf.P[:4, :4] *= 4
-            self.kf.P[4:, 4:] *= 100
-            self.bbox_to_z_func = convert_bbox_to_z_new
-            self.x_to_bbox_func = convert_x_to_bbox_new
-        else:
+        
+        if not new_kf:  # trường hợp false
             self.kf = KalmanFilter(dim_x=7, dim_z=4)
             self.kf.F = np.array(
                 [
-                    # x  y  s  r  x' y' s'
+                    #x  y  s  r  x' y' s'
                     [1, 0, 0, 0, 1, 0, 0],
                     [0, 1, 0, 0, 0, 1, 0],
                     [0, 0, 1, 0, 0, 0, 1],
@@ -528,16 +460,46 @@ class KalmanBoxTracker(object):
                     [0, 0, 0, 1, 0, 0, 0],
                 ]
             )
-            self.kf.R[2:, 2:] *= 10.0
-            self.kf.P[4:, 4:] *= 1000.0  # high uncertainty for unobservable initial velocities
-            self.kf.P *= 10.0
-            self.kf.Q[-1, -1] *= 0.01
-            self.kf.Q[4:, 4:] *= 0.01
+            
+            self.kf.R[2:, 2:] *= 10.    # tăng noise cho s, r
+            self.kf.P[4:, 4:] *= 1000.  # tăng sự không chắc chắn cho velocity tức x', y', s'
+            self.kf.P *= 10.            # sự không chắc chắn toàn bộ
+            self.kf.Q[-1, -1] *= 0.01   # s' thường thay đổi ít
+            self.kf.Q[4:, 4:] *= 0.01   # giả định s' thay đổi chậm
+
             self.bbox_to_z_func = convert_bbox_to_z
             self.x_to_bbox_func = convert_x_to_bbox
-
-        self.kf.x[:4] = self.bbox_to_z_func(bbox)
-
+            
+            self.kf.x[:4] = self.bbox_to_z_func(bbox)
+            
+        else:   #new_kf = True -> point [x, y, vx, vy]
+            self.kf = KalmanFilter(dim_x=4, dim_z=2)
+            self.kf.F = np.array(
+                [
+                    #x  y  x' y'
+                    [1, 0, 1, 0],
+                    [0, 1, 0, 1],
+                    [0, 0, 1, 0],
+                    [0, 0, 0, 1],
+                ]
+            )
+            self.kf.H = np.array(
+                [
+                    [1, 0, 0, 0],
+                    [0, 1, 0, 0]
+                ]
+            )
+            # self.kf.R = self.kf.R     #không đo kích thước -> noise đều
+            self.kf.P[2:, 2:] *= 100.0  # high uncertainty for unobservable initial velocities
+            self.kf.P *= 10.0
+            self.kf.Q[2:, 2:] *= 0.01   # vx, vy
+            self.bbox_to_z_func = convert_bbox_to_z_new
+            self.x_to_bbox_func = convert_x_to_bbox_new
+            
+            self.kf.x[:2] = self.bbox_to_z_func(bbox)
+            self.last_wh = np.array([bbox[2] - bbox[0], bbox[3] - bbox[1]])  # x2-x1, y2-y1
+        
+        self.last_observation = np.array([-1, -1, -1, -1, -1])  # placeholder
         self.time_since_update = 0
         self.id = KalmanBoxTracker.count
         KalmanBoxTracker.count += 1
@@ -546,8 +508,6 @@ class KalmanBoxTracker(object):
         self.hit_streak = 0
         self.age = 0
 
-        # NOTE: [-1,-1,-1,-1,-1] is a placeholder for non-observation status.
-        self.last_observation = np.array([-1, -1, -1, -1, -1])  # placeholder
         self.history_observations = []
         self.observations = dict()
         self.velocity = None
@@ -571,21 +531,22 @@ class KalmanBoxTracker(object):
                         break
                 if previous_box is None:
                     previous_box = self.last_observation
+                    
                 self.velocity = speed_direction(previous_box, bbox)
 
             self.last_observation = bbox
             self.observations[self.age] = bbox
             self.history_observations.append(bbox)
+            if self.new_kf:
+                self.last_wh = np.array([bbox[2] - bbox[0], bbox[3] - bbox[1]])  
 
             self.time_since_update = 0
             self.history = []
             self.hits += 1
             self.hit_streak += 1
-            if self.new_kf:
-                R = new_kf_measurement_noise(self.kf.x[2, 0], self.kf.x[3, 0])
-                self.kf.update(self.bbox_to_z_func(bbox), R=R)
-            else:
-                self.kf.update(self.bbox_to_z_func(bbox))
+            
+            self.kf.update(self.bbox_to_z_func(bbox))
+
         else:
             self.kf.update(bbox)
             self.frozen = True
@@ -601,20 +562,11 @@ class KalmanBoxTracker(object):
         """
         Advances the state vector and returns the predicted bounding box estimate.
         """
-        if self.new_kf:
-            if self.kf.x[2] + self.kf.x[6] <= 0:
-                self.kf.x[6] = 0
-            if self.kf.x[3] + self.kf.x[7] <= 0:
-                self.kf.x[7] = 0
-            if self.frozen:
-                self.kf.x[6] = self.kf.x[7] = 0
-            Q = new_kf_process_noise(self.kf.x[2, 0], self.kf.x[3, 0])
-        else:
+        if not self.new_kf:
             if (self.kf.x[6] + self.kf.x[2]) <= 0:
                 self.kf.x[6] *= 0.0
-            Q = None
-
-        self.kf.predict(Q=Q)
+        
+        self.kf.predict()
         self.age += 1
         if self.time_since_update > 0:
             self.hit_streak = 0
@@ -626,6 +578,10 @@ class KalmanBoxTracker(object):
         """
         Returns the current bounding box estimate.
         """
+        if self.new_kf:
+            cx, cy_bottom = self.x_to_bbox_func(self.kf.x[:2])  # tọa độ sân → bottom center pixel
+            w, h = self.last_wh
+            return np.array([[cx - w/2, cy_bottom - h, cx + w/2, cy_bottom]])
         return self.x_to_bbox_func(self.kf.x)
 
     def mahalanobis(self, bbox):
@@ -640,21 +596,23 @@ class KalmanBoxTracker(object):
 class OCSort(object):
     def __init__(
         self,
+        use_project = False,
         det_thresh = 0.3,
-        use_emb = True,
+        use_emb = False,
         max_age=30,
         min_hits=5,
-        iou_threshold=0.3,
+        iou_threshold= 0.4,
+        distance_threshold = 100,
         delta_t=3,
-        inertia=0.25,    #lamda trong cost(iou) + lamda*cost(velocity)
-        w_association_emb=0.75, # weight embed khởi tạo (a_w), nếu không dùng AW, tính cost(ocsort) + w_association_emb*emb
+        inertia=0.2,    #lamda trong cost(iou) + lamda*cost(velocity)
+        w_association_emb=0.8, # weight embed khởi tạo (a_w), nếu không dùng AW, tính cost(ocsort) + w_association_emb*emb
         alpha_fixed_emb=0.95,   #fixed alpha trong EMA, càng lớn càng ưu tiên lịch sử
-        aw_param=0.4,   #epsilon, càng cao càng dễ dãi với tỉ lệ top2/top1 -> weight càng có thể lớn
-        aw_off=False,
-        new_kf_off=False,
+        aw_param=0.5,   #epsilon, càng cao càng dễ dãi với tỉ lệ top2/top1 -> weight càng có thể lớn
+        aw_off=False
     ):
         """
         Args:
+            use_project      (bool):  True nếu muốn sử dụng tọa độ chiếu x,y làm observation.
             det_thresh       (float): Ngưỡng confidence tối thiểu của detection đầu vào.
                                       Detections có score <= det_thresh bị loại bỏ.
             use_emb           (bool): Có dùng feature embedding trong association hay không.
@@ -664,6 +622,8 @@ class OCSort(object):
             min_hits           (int): Số frame match liên tiếp tối thiểu để một track
                                       được output ra ngoài (confirmed track).
             iou_threshold    (float): Ngưỡng IoU tối thiểu để chấp nhận một match
+                                      trong cả 2 round association.
+            distance         (float): Ngưỡng khoảng cách euclid  tối đa để chấp nhận một match (theo pixel)
                                       trong cả 2 round association.
             delta_t            (int): Số frame nhìn lại để tính velocity cho OCM.
                                       Càng lớn → velocity ổn định hơn nhưng lag hơn.
@@ -676,11 +636,11 @@ class OCSort(object):
             aw_param         (float): Tham số `bottom` của Adaptive Weighting.
                                       Điều chỉnh mức độ giảm weight khi embedding không discriminative.
             aw_off            (bool): Nếu True, tắt Adaptive Weighting, dùng w_association_emb cố định.
-            new_kf_off        (bool): Nếu True, dùng Kalman filter cũ [x,y,s,r] thay vì [x,y,w,h].
         """
         self.max_age = max_age      # số frame lost tối đa
         self.min_hits = min_hits    # Số frame liên tiếp phải match để được confirmed
         self.iou_threshold = iou_threshold  # ngưỡng iou trong association
+        self.distance_threshold = distance_threshold
         self.trackers = []
         self.frame_count = 0
         self.det_thresh = det_thresh    # ngưỡng lọc det đầu vào
@@ -694,7 +654,7 @@ class OCSort(object):
         KalmanBoxTracker.count = 0
         
         self.aw_off = aw_off
-        self.new_kf_off = new_kf_off
+        self.new_kf = use_project
         
 
     def update(self, detections, frame_id):
@@ -758,8 +718,11 @@ class OCSort(object):
         to_del = []
         ret = []
         for t, trk in enumerate(trks):
-            pos = self.trackers[t].predict()[0]
-            trk[:] = [pos[0], pos[1], pos[2], pos[3], 0]
+            pos = self.trackers[t].predict()[0] 
+            if not self.new_kf:
+                trk[:] = [pos[0], pos[1], pos[2], pos[3], 0]
+            else:   # pad thêm để giữ shape, thực tế chỉ cần pos[0] và pos[1] tức x,y để tính euclid distance
+                trk[:] = [pos[0], pos[1], pos[0], pos[1], 0] 
             if np.any(np.isnan(pos)):
                 to_del.append(t)
             else:
@@ -788,18 +751,33 @@ class OCSort(object):
         else:
             stage1_emb_cost = None
 
-        matched, unmatched_dets, unmatched_trks = associate(
-            dets,
-            trks,
-            self.iou_threshold,
-            velocities,
-            k_observations,
-            self.inertia,
-            stage1_emb_cost,
-            self.w_association_emb,
-            self.aw_off,
-            self.aw_param,
-        )
+        if not self.new_kf:
+            matched, unmatched_dets, unmatched_trks = associate(
+                dets,
+                trks,
+                self.iou_threshold,
+                velocities,
+                k_observations,
+                self.inertia,
+                stage1_emb_cost,
+                self.w_association_emb,
+                self.aw_off,
+                self.aw_param,
+            )
+        else:   #associaate theo khoảng cách Euclid
+            matched, unmatched_dets, unmatched_trks = associate_euclidean(
+                dets,                  # [x1,y1,x2,y2,score] — lấy bottom center bên trong
+                trks,                  # [x,y,x,y,0] — lấy x,y bên trong
+                self.distance_threshold,    
+                velocities,
+                k_observations,
+                self.inertia,
+                stage1_emb_cost,
+                self.w_association_emb,
+                self.aw_off,
+                self.aw_param,
+            )
+            
         for m in matched:   #[[det, track],...]
             self.trackers[m[1]].update(dets[m[0], :])
             if self.use_emb:
@@ -810,13 +788,14 @@ class OCSort(object):
         """
         if unmatched_dets.shape[0] > 0 and unmatched_trks.shape[0] > 0:
             left_dets = dets[unmatched_dets]
-            left_trks = last_boxes[unmatched_trks]
+            left_trks = last_boxes[unmatched_trks]  # last_observation vẫn là [x1,y1,x2,y2,score] không cần sửa association round2
+            
             iou_left = self.asso_func(left_dets, left_trks)
             iou_left = np.array(iou_left)
             
             if self.use_emb:
                 left_dets_embs = dets_embs[unmatched_dets]
-                left_trks_embs = trk_embs[unmatched_trks]
+                left_trks_embs = trk_embs[unmatched_trks]   
                 emb_cost_left = left_dets_embs @ left_trks_embs.T
                 rematching_cost = -(iou_left + emb_cost_left)
             else:
@@ -851,9 +830,9 @@ class OCSort(object):
             trk = KalmanBoxTracker(
                 dets[i, :],
                 delta_t=self.delta_t,
-                emb=dets_embs[i] if self.use_emb else None,
-                alpha=dets_alpha[i] if self.use_emb else 0,
-                new_kf=not self.new_kf_off,
+                emb= dets_embs[i] if self.use_emb else None,
+                alpha= dets_alpha[i] if self.use_emb else 0,
+                new_kf= self.new_kf,
             )
             self.trackers.append(trk)
 
@@ -862,10 +841,6 @@ class OCSort(object):
             if trk.last_observation.sum() < 0:
                 d = trk.get_state()[0]
             else:
-                """
-                This is optional: use the recent observation or the Kalman filter prediction.
-                We didn't notice significant difference here.
-                """
                 d = trk.last_observation[:4]
             if (trk.time_since_update < 1) and (
                 trk.hit_streak >= self.min_hits or self.frame_count <= self.min_hits

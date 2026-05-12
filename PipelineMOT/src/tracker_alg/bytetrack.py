@@ -6,21 +6,31 @@ Repo : https://github.com/FoundationVision/ByteTrack
 Mở rộng: thêm Appearance Feature (EMA) vào first association.
   - Nếu feat=None → chạy ByteTrack thuần IoU như gốc
   - Nếu feat có → fuse IoU cost + embedding cosine cost trong first association
+Mở rộng 2: thêm lựa chọn sử dụng pitch localization vào mọi bước association/
+    - Nếu use_project = True -> thay đổi state từ dạng [x, y, a, h] về [x,y] theo pitch
+                                thay cost IOU thành cost theo euclid distance đã biến đổi theo similarity
+                                cần điều chỉnh distance_threshold
+    - Nếu use_project =  False -> chạy ByteTrack bình thường với IoU
 
 Input : list of dict [{'tlbr': [x1,y1,x2,y2], 'score': float, 'feat': np.array hoặc None}, ...]
 Output: List[STrack]
+
+[TODO]: Định nghĩa hàm _tlwh_to_xy_pitch và inverse_homography
 """
 
 import numpy as np
-from typing import List, Dict, Optional, Tuple
+from typing import List, Dict, Optional, Tuple, Union
 import lap
 from .basetrack import BaseTrack, TrackState
-from .kalman_filter import KalmanFilter
-
+from .kalman_filter import KalmanFilterXY, KalmanFilter
 
 # ─────────────────────────────────────────────────────────────
 # STrack
 # ─────────────────────────────────────────────────────────────
+def inverse_homography(tlwh: np.ndarray):
+    # Tự định nghĩa tại đây hoặc import từ module pitch localization
+    pass
+
 
 class STrack(BaseTrack):
     """
@@ -30,7 +40,7 @@ class STrack(BaseTrack):
 
     shared_kalman = KalmanFilter()
 
-    def __init__(self, tlwh: np.ndarray, score: float):
+    def __init__(self, tlwh: np.ndarray, score: float, use_project = False):
         super().__init__()  # time_since_update là instance var
         self._tlwh        = np.asarray(tlwh, dtype=np.float64)
         self.score        = score
@@ -38,7 +48,10 @@ class STrack(BaseTrack):
         self.tracklet_len = 0
         self.mean         = None
         self.covariance   = None
-        self.kalman_filter: Optional[KalmanFilter] = None
+        self.kalman_filter: Optional[Union[KalmanFilter, KalmanFilterXY]] = None
+        
+        self.use_project = use_project
+        self.last_wh = np.array([tlwh[2], tlwh[3]])  # w, h từ tlwh
 
         # Appearance feature
         self.feat        = None
@@ -68,7 +81,11 @@ class STrack(BaseTrack):
             return
         mean_state = self.mean.copy()
         if self.state != TrackState.Tracked:
-            mean_state[7] = 0
+            if self.use_project:
+                mean_state[2] = 0   # vx = 0
+                mean_state[3] = 0   # vy = 0
+            else:
+                mean_state[7] = 0   # vh = 0
         self.mean, self.covariance = self.shared_kalman.predict(
             mean_state, self.covariance)
         self.time_since_update += 1
@@ -80,9 +97,14 @@ class STrack(BaseTrack):
             return
         multi_mean       = np.asarray([st.mean.copy() for st in valid])
         multi_covariance = np.asarray([st.covariance  for st in valid])
+        
         for i, st in enumerate(valid):
             if st.state != TrackState.Tracked:
-                multi_mean[i][7] = 0
+                if st.use_project:
+                    multi_mean[i][2] = 0  # vx
+                    multi_mean[i][3] = 0  # vy
+                else:
+                    multi_mean[i][7] = 0  # vh
         multi_mean, multi_covariance = STrack.shared_kalman.multi_predict(
             multi_mean, multi_covariance)
         for i, (m, c) in enumerate(zip(multi_mean, multi_covariance)):
@@ -92,11 +114,15 @@ class STrack(BaseTrack):
 
     # ── Lifecycle ────────────────────────────────────────────
 
-    def activate(self, kalman_filter: KalmanFilter, frame_id: int):
+    def activate(self, kalman_filter, frame_id: int):
         self.kalman_filter = kalman_filter
         self.track_id      = self.next_id()
-        self.mean, self.covariance = self.kalman_filter.initiate(
-            self.tlwh_to_xyah(self._tlwh))
+        if self.use_project:
+            measurement = self._tlwh_to_xy_pitch(self._tlwh)     # Định nghĩa hàm _tlwh_to_xy_pitch
+        else:
+            measurement = self.tlwh_to_xyah(self._tlwh)
+            
+        self.mean, self.covariance = self.kalman_filter.initiate(measurement)
         self.tracklet_len      = 0
         self.state             = TrackState.Tracked
         self.is_activated      = (frame_id == 1)
@@ -107,9 +133,16 @@ class STrack(BaseTrack):
     def re_activate(self, new_track: 'STrack', frame_id: int, new_id: bool = False):
         if self.kalman_filter is None:
             self.kalman_filter = STrack.shared_kalman
+            
+        if self.use_project:
+            measurement = self._tlwh_to_xy_pitch(new_track._tlwh)  # TODO
+            self.last_wh = new_track._tlwh[2:]
+        else:
+            measurement = self.tlwh_to_xyah(new_track.tlwh)
+            
         self.mean, self.covariance = self.kalman_filter.update(
-            self.mean, self.covariance,
-            self.tlwh_to_xyah(new_track.tlwh))
+            self.mean, self.covariance, measurement)
+        
         if new_track.feat is not None:
             self.update_features(new_track.feat)
         self.tracklet_len      = 0
@@ -126,9 +159,16 @@ class STrack(BaseTrack):
             self.kalman_filter = STrack.shared_kalman
         self.frame_id          = frame_id
         self.tracklet_len     += 1
+        
+        if self.use_project:
+            measurement = self._tlwh_to_xy_pitch(new_track._tlwh)  # TODO
+            self.last_wh = new_track._tlwh[2:]  # cập nhật w,h
+        else:
+            measurement = self.tlwh_to_xyah(new_track.tlwh)
+            
         self.mean, self.covariance = self.kalman_filter.update(
-            self.mean, self.covariance,
-            self.tlwh_to_xyah(new_track.tlwh))
+            self.mean, self.covariance, measurement)
+        
         if new_track.feat is not None:
             self.update_features(new_track.feat)
         self.state             = TrackState.Tracked
@@ -149,6 +189,10 @@ class STrack(BaseTrack):
 
     @property
     def tlbr(self) -> np.ndarray:
+        if self.use_project:
+            cx, cy_bottom = inverse_homography(self.mean[:2])  # TODO
+            w, h = self.last_wh
+            return np.array([cx - w/2, cy_bottom - h, cx + w/2, cy_bottom])
         ret      = self.tlwh.copy()
         ret[2:] += ret[:2]
         return ret
@@ -165,6 +209,11 @@ class STrack(BaseTrack):
         ret      = np.asarray(tlbr, dtype=np.float64).copy()
         ret[2:] -= ret[:2]
         return ret
+
+    @staticmethod
+    def _tlwh_to_xy_pitch(tlwh):
+        """TODO: placeholder — gọi homography từ module pitch localization."""
+        return np.array([0.0, 0.0])
 
     def __repr__(self):
         return f'OT_{self.track_id}_({self.start_frame}-{self.end_frame})'
@@ -194,6 +243,46 @@ def iou_distance(atracks: List[STrack], btracks: List[STrack]) -> np.ndarray:
         np.array([t.tlbr for t in atracks], dtype=np.float32),
         np.array([t.tlbr for t in btracks], dtype=np.float32))
 
+def _euclidean_batch(points1: np.ndarray, points2: np.ndarray) -> np.ndarray:
+    """
+    Tính ma trận Euclidean distance giữa 2 tập điểm.
+
+    Args:
+        points1 (np.ndarray): Shape (M, 2) — [x, y]
+        points2 (np.ndarray): Shape (N, 2) — [x, y]
+
+    Returns:
+        np.ndarray: Shape (M, N) — distance matrix, [0, +inf)
+    """
+    if len(points1) == 0 or len(points2) == 0:
+        return np.zeros((len(points1), len(points2)), dtype=np.float32)
+    diff = points1[:, None, :] - points2[None, :, :]  # (M, N, 2)
+    return np.sqrt(np.sum(diff ** 2, axis=-1))         # (M, N)
+
+
+def euclidean_distance(atracks: List[STrack], btracks: List[STrack],
+                       distance_threshold: float) -> np.ndarray:
+    """
+    Tính similarity matrix từ Euclidean distance — dùng thay iou_distance khi use_project=True.
+    Normalize về [0, 1]: gần → 1, xa → 0, tương đương IoU về chiều optimize.
+    """
+    if not atracks or not btracks:
+        return np.zeros((len(atracks), len(btracks)), dtype=np.float32)
+    
+    def get_xy(t: STrack) -> np.ndarray:
+        if t.mean is not None:
+            return t.mean[:2]
+        
+        # fallback: bottom center từ tlwh [x1, y1, w, h]
+        x1, y1, w, h = t._tlwh
+        return np.array([x1 + w / 2, y1 + h])  # cx, y_bottom
+
+    a_xy = np.array([get_xy(t) for t in atracks], dtype=np.float32) # (M, 2)
+    b_xy = np.array([get_xy(t) for t in btracks], dtype=np.float32) # (N, 2)
+
+    dist = _euclidean_batch(a_xy, b_xy)                                # (M, N)
+    similarity = 1 - np.clip(dist / distance_threshold, 0, 1)         # (M, N) [0,1]
+    return 1 - similarity                                               
 
 def embedding_distance(atracks: List[STrack], btracks: List[STrack]) -> np.ndarray:
     """Cosine distance dựa trên EMA smooth_feat. Trả về None nếu không có feat."""
@@ -214,7 +303,7 @@ def fuse_iou_emb(iou_cost: np.ndarray,
                  emb_cost: Optional[np.ndarray],
                  lambda_iou: float = 0.7) -> np.ndarray:
     """
-    Fuse IoU cost và embedding cost.
+    Fuse IoU/euclid cost và embedding cost.
     lambda_iou=0.98 → ưu tiên IoU, embedding chỉ là tie-breaker.
     Nếu emb_cost=None → trả về iou_cost thuần.
     """
@@ -302,6 +391,8 @@ class ByteTrack:
 
     def __init__(
         self,
+        use_project:       bool = False,
+        distance_threshold = 100,   # Tham số điều chỉnh scale của distance
         track_high_thresh: float = 0.6,
         track_low_thresh:  float = 0.1,
         new_track_thresh:  float = 0.65,
@@ -310,14 +401,22 @@ class ByteTrack:
         frame_rate:        int   = 30,
         lambda_iou:        float = 0.98,   # trọng số IoU khi có appearance feat
     ):
+        self.use_project = use_project  # Đánh dấu sử dụng project lên tọa độ sân
+        if use_project:
+            self.kalman_filter = KalmanFilterXY()
+            STrack.shared_kalman = self.kalman_filter  # override class variable
+        else:
+            self.kalman_filter = KalmanFilter()
+            STrack.shared_kalman = self.kalman_filter
+        
         self.track_high_thresh = track_high_thresh
         self.track_low_thresh  = track_low_thresh
         self.new_track_thresh  = new_track_thresh
         self.match_thresh      = match_thresh
         self.max_time_lost     = int(frame_rate / 30.0 * track_buffer)
         self.lambda_iou        = lambda_iou
+        self.distance_threshold = distance_threshold
 
-        self.kalman_filter    = KalmanFilter()
         self.tracked_stracks: List[STrack] = []
         self.lost_stracks:    List[STrack] = []
         self.removed_stracks: List[STrack] = []
@@ -326,13 +425,12 @@ class ByteTrack:
 
     # ── Detection helper ─────────────────────────────────────
 
-    @staticmethod
-    def _build_stracks(det_list: List[Dict]) -> List[STrack]:
+    def _build_stracks(self, det_list: List[Dict]) -> List[STrack]:
         out = []
         for d in det_list:
             x1, y1, x2, y2 = d['tlbr']
             st = STrack(np.array([x1, y1, x2 - x1, y2 - y1], dtype=np.float64),
-                        float(d['score']))
+                        float(d['score']), use_project=self.use_project)
             if d.get('feat') is not None:
                 st.update_features(d['feat'])
             out.append(st)
@@ -367,9 +465,13 @@ class ByteTrack:
         # ── 3. First association: (confirmed+lost) ↔ high dets
         # Có appearance feat → fuse IoU + embedding
         # Không có feat      → IoU thuần (ByteTrack gốc)
-        iou_cost_1 = iou_distance(strack_pool, dets_high)
         emb_cost_1 = embedding_distance(strack_pool, dets_high)  # None nếu không có feat
-        cost_1     = fuse_iou_emb(iou_cost_1, emb_cost_1, self.lambda_iou)
+        if self.use_project:
+            cost_1 = euclidean_distance(strack_pool, dets_high, self.distance_threshold)
+        else:
+            cost_1 = iou_distance(strack_pool, dets_high)
+
+        cost_1     = fuse_iou_emb(cost_1, emb_cost_1, self.lambda_iou)
         cost_1     = fuse_score(cost_1, dets_high)   # fuse detection score
 
         matches_1, u_track_1, u_det_1 = linear_assignment(cost_1, self.match_thresh)
@@ -388,7 +490,10 @@ class ByteTrack:
         # Second association chỉ dùng IoU (ByteTrack gốc, không fuse emb/score)
         r_tracked = [strack_pool[i] for i in u_track_1
                      if strack_pool[i].state == TrackState.Tracked]
-        cost_2    = iou_distance(r_tracked, dets_low)
+        if self.use_project:
+            cost_2 = euclidean_distance(r_tracked, dets_low, self.distance_threshold)
+        else:
+            cost_2 = iou_distance(r_tracked, dets_low)
         matches_2, u_track_2, _ = linear_assignment(cost_2, thresh=0.5)
 
         for it, id_ in matches_2:
@@ -409,7 +514,10 @@ class ByteTrack:
 
         # ── 5. Third association: unconfirmed ↔ remaining high dets
         rem_dets  = [dets_high[i] for i in u_det_1]
-        cost_unc  = iou_distance(unconfirmed, rem_dets)
+        if self.use_project:
+            cost_unc = euclidean_distance(unconfirmed, rem_dets, self.distance_threshold)
+        else:
+            cost_unc = iou_distance(unconfirmed, rem_dets)
         cost_unc  = fuse_score(cost_unc, rem_dets)
         matches_unc, u_unconf, u_det_2 = linear_assignment(cost_unc, thresh=0.7)
 

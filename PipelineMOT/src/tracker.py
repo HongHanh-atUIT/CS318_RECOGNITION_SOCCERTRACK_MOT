@@ -24,14 +24,16 @@ class Tracker:
     Supported algorithms: 'deepeiou', 'bytetrack', 'strongsort', 'ocsort'
     """
     SUPPORTED = ('deepeiou', 'bytetrack', 'strongsort', 'ocsort')
-    def __init__(self, algorithm: str = 'deepeiou', **kwargs):
+    def __init__(self, use_project = False, algorithm: str = 'deepeiou', **kwargs):
         """
         algorithm : tên thuật toán (case-insensitive)
         kwargs    : tham số truyền thẳng vào constructor của tracker tương ứng
         """
         algo = algorithm.lower().replace('-', '').replace('_', '')
- 
+        kwargs['use_project'] = use_project
         if algo == 'deepeiou':
+            if use_project:
+                raise ValueError("Deep EIOU không thể sử dụng phép chiếu! Sử dụng Deep EIOU mặc định")
             from tracker_alg.deepeiou import DeepEIoU
             self._tracker = DeepEIoU(**kwargs)
         elif algo == 'bytetrack':
@@ -50,11 +52,13 @@ class Tracker:
             )
  
         self.algorithm = algo
+        self.use_project = use_project
  
     def update(self, detections: List[Dict], frame_id: int):
         """
-        Chạy một bước tracking cho frame hiện tại.
- 
+        Chạy một bước tracking cho frame hiện tại. Nếu có sử dụng phép chiếu, thay 'tlbr' bằng 'xy'
+        'xy' là tọa độ của cầu thủ trên sân bóng
+        
         Parameters
         ----------
         detections : list of dict

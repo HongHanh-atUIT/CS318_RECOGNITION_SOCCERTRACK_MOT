@@ -1,4 +1,3 @@
-# vim: expandtab:ts=4:sw=4
 import numpy as np
 import scipy.linalg
 
@@ -169,21 +168,85 @@ class KalmanFilter(object):
 
 
 # ─────────────────────────────────────────────────────────────
-# KalmanFilterNew — dùng cho OC-SORT (new_kf=True)
-# State space: [x, y, w, h, vx, vy, vw, vh]
-# Adaptive process/measurement noise theo box size
+# KalmanFilterXY dùng cho trường hợp state là x,y pitch
+# Dùng trong ByteTrack và StrongSort
+# State space: [x, y, x', y']
+# ─────────────────────────────────────────────────────────────
+class KalmanFilterXY(KalmanFilter):
+    """
+    Biến thể stateless cho state [x, y, vx, vy] — 4D.
+    Dùng khi use_project=True, measurement là tọa độ sân [x, y].
+    Interface giữ nguyên: predict(mean, cov), update(mean, cov, measurement)
+    """
+
+    def __init__(self):
+        # không gọi super().__init__() vì ta override toàn bộ
+        self._motion_mat = np.array([
+            [1, 0, 1, 0],
+            [0, 1, 0, 1],
+            [0, 0, 1, 0],
+            [0, 0, 0, 1],
+        ], dtype=float)
+
+        self._update_mat = np.array([
+            [1, 0, 0, 0],
+            [0, 1, 0, 0],
+        ], dtype=float)
+
+        self._std_weight_position = 1. / 20
+        self._std_weight_velocity = 1. / 160
+
+    def initiate(self, measurement):
+        """measurement: [x, y]"""
+        mean = np.r_[measurement, np.zeros(2)]  # [x, y, 0, 0]
+        std = [
+            2 * self._std_weight_position,
+            2 * self._std_weight_position,
+            10 * self._std_weight_velocity,
+            10 * self._std_weight_velocity,
+        ]
+        covariance = np.diag(np.square(std))
+        return mean, covariance
+
+    def predict(self, mean, covariance):
+        std_pos = [self._std_weight_position] * 2   # 2 phần tử là self._std_weight_position
+        std_vel = [self._std_weight_velocity] * 2
+        motion_cov = np.diag(np.square(np.r_[std_pos, std_vel]))
+        mean       = self._motion_mat @ mean
+        covariance = self._motion_mat @ covariance @ self._motion_mat.T + motion_cov
+        return mean, covariance
+
+    def project(self, mean, covariance, confidence=0.0):
+        std = [self._std_weight_position] * 2
+        std = [(1 - confidence) * x for x in std]
+        innovation_cov = np.diag(np.square(std))
+        projected_mean = self._update_mat @ mean
+        projected_cov  = self._update_mat @ covariance @ self._update_mat.T
+        return projected_mean, projected_cov + innovation_cov
+
+    def multi_predict(self, mean, covariance):
+        N = len(mean)
+        std_pos = [self._std_weight_position * np.ones(N)] * 2
+        std_vel = [self._std_weight_velocity * np.ones(N)] * 2
+        sqr        = np.square(np.r_[std_pos, std_vel]).T   # (N, 4)
+        motion_cov = np.array([np.diag(s) for s in sqr])    # (N, 4, 4)
+        mean       = (self._motion_mat @ mean.T).T
+        covariance = self._motion_mat @ covariance @ self._motion_mat.T + motion_cov
+        return mean, covariance
+    
+    
+# ─────────────────────────────────────────────────────────────
+# KalmanFilterNew — dùng cho OC-SORT
+# State space: [x, y, s, h, x', y', s']
 # ─────────────────────────────────────────────────────────────
 
 class KalmanFilterNew:
     """
-    Kalman Filter với state space [x, y, w, h] cho OC-SORT.
+    Kalman Filter dùng cho OC-SORT
 
-    Khác KalmanFilter chuẩn:
-    - State dùng (w, h) thay vì (aspect_ratio, h)
-    - Process noise Q và measurement noise R được tính adaptive
-      theo kích thước box hiện tại (xem new_kf_process_noise / new_kf_measurement_noise)
-    - Được gọi từ KalmanBoxTracker trong ocsort.py khi new_kf=True
-
+    - Nếu new_kf = Fasle -> state có dạng (x, y, s, h, x', y', s') -> dimx = 7, dimz = 4
+    - Nếu new_kf = True -> state có dạng (x, y) -> dimx = 4, dimz = 2
+                            R và Q cũng được biến đổi để không có nhiễu theo kích thước
     Interface tương thích filterpy.kalman.KalmanFilter:
       self.x, self.P, self.F, self.H, self.R, self.Q
       .predict(Q=None), .update(z, R=None)
