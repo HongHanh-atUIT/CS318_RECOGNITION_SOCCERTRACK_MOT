@@ -1,4 +1,13 @@
-ultralytics 
 gdown
 rfdetr
 lap
+numpy
+pandas
+torch
+torchvision
+ultralytics
+opencv-python
+Pillow
+tqdm
+scikit-learn
+scipy

@@ -1,6 +1,7 @@
 from src.compute_metrics import compute_metrics
 from typing import List, Dict, Optional
 from src.tracker import Tracker
+import time
 import cv2
 
 # Plot 
@@ -146,17 +147,17 @@ def run_mot(video_path, detector, tracker, extractor=None, refiner = None, extra
     frame_idx = 0   # 0-based index để index vào list
     frame_id  = 1   # 1-based id truyền vào tracker (convention của STrack)
     
-    # extractor của refiner
-    extractor_refine = extractor_refine if (refiner is not None and extractor_refine is not None) else extractor
+    # extract cả khi không dùng refiner, để tiện không chạy lại pipeline khi áp dụng refiner
+    need_refine_feat = extractor_refine is not None  
     
     # Duyệt qua từng frame 
+    start = time.time()
     while True:
         ret, frame = cap.read()
         if not ret:
             break
 
-        if frame_idx % 100 == 0:
-            print(f"Processing frame {frame_idx}")
+        print(f"Processing frame {frame_idx}")
         
         # Bước 2.1: Detect
         detections = detector.detect(frame) # Trả về list các box và conf [[x1, y1, x2, y2, conf]]
@@ -199,7 +200,7 @@ def run_mot(video_path, detector, tracker, extractor=None, refiner = None, extra
                     'boxes' : [None] * frame_idx,
                     'frames': [],
                 }
-                if refiner is not None:
+                if need_refine_feat:
                     entry['feats'] = []         # chỉ khởi tạo khi cần refinement
                 all_tracks[tid] = entry
  
@@ -208,7 +209,7 @@ def run_mot(video_path, detector, tracker, extractor=None, refiner = None, extra
             all_tracks[tid]['frames'].append(frame_idx)
  
             # Nếu cần refine:
-            if refiner is not None:
+            if need_refine_feat:
                 x1, y1, x2, y2 = map(int, track.tlbr)
                 # Clamp để tránh ra ngoài biên frame
                 crop = frame[y1:y2, x1:x2]
@@ -227,7 +228,8 @@ def run_mot(video_path, detector, tracker, extractor=None, refiner = None, extra
         frame_id  += 1
         
     cap.release()
-    print(f"\n[MOT] Done — {frame_idx} frames, {len(all_tracks)} tracks")
+    end = time.time()
+    print(f"\n[MOT] Done — {frame_idx} frames, {len(all_tracks)} tracks, {(end-start):.2f} seconds")
     return all_tracks
 
 def run_pipeline(
@@ -276,24 +278,9 @@ def run_pipeline(
         
     tracker_kwargs = tracker_kwargs or {}
     tracker        = Tracker(algorithm=tracker_name, **tracker_kwargs)
-    ext_name = extractor.backend if extractor is not None else 'None'
     ref_name = refiner_extractor.backend if refiner_extractor is not None else \
                (extractor.backend if extractor is not None else 'None')
-    
-    if refiner is not None:
-        print(f"\n{'='*60}")
-        print(f"PIPELINE: {detector.backend.upper()} → "
-            f"{ext_name.upper()} → "
-            f"{tracker_name.upper()} → "
-            f"GTALink({ref_name})")
-        print(f"{'='*60}")
-    else:
-        print(f"\n{'='*60}")
-        print(f"PIPELINE: {detector.backend.upper()} → "
-            f"{ext_name.upper()} → "
-            f"{tracker_name.upper()}")
-        print(f"{'='*60}")
-        
+               
     if input_tracks is None:
         print("===== Chưa có kết quả MOT - Chạy toàn bộ pipeline ======")
         # Bước 1-2: MOT không chạy refiner, có trích xuất đặc trưng vào all_tracks nếu refiner = True
@@ -312,9 +299,12 @@ def run_pipeline(
     else:
         print("===== Đã có kết quả MOT - Tái sử dụng ======")
         # Bước 3: Offline refinement
+        start = time.time()
         if refiner is not None:
             print(f"[OFFLINE TRACKER] Đang refine output bằng GTALink với extractor là {ref_name}")
             all_tracks = refine(input_tracks, refiner)   #all_tracks có feat nhưng bỏ feat sau output refiner
+            end = time.time()
+            print(f"[OFFLINE TRACKER] Hoàn tất sau {(end-start):.2f} seconds.")
         else:
             all_tracks = input_tracks   # Nếu không dùng refiner dùng trực tiếp input track để tính các bước tiếp theo
 
