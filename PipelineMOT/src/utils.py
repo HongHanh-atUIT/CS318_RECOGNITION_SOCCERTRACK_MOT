@@ -144,7 +144,7 @@ def run_mot(video_path, detector, tracker, extractor=None, refiner=None, extract
     frame_id  = 1
 
     need_refine_feat = extractor_refine is not None
-
+    total_extract = 0
     start = time.time()
     while True:
         ret, frame = cap.read()
@@ -186,6 +186,8 @@ def run_mot(video_path, detector, tracker, extractor=None, refiner=None, extract
         # ── Bước 2.5: Batch feature extraction (refinement) ─────────────
         # Chỉ crop lại từ active tracks (có thể khác với detection crops
         # do tracker dùng Kalman smoothing / predicted box).
+        
+        start_extract = time.time()
         if need_refine_feat and active_tracks:
             refine_crops = []
             for track in active_tracks:
@@ -197,7 +199,9 @@ def run_mot(video_path, detector, tracker, extractor=None, refiner=None, extract
             refine_feats = extractor_refine.extract_batch(refine_crops)  # list[np.ndarray]
         else:
             refine_feats = [None] * len(active_tracks)
-
+        end_extract = time.time()
+        total_extract += end_extract - start_extract
+        
         # ── Bước 2.6: Lưu all_tracks ────────────────────────────────────
         active_ids = set()
         for track, ref_feat in zip(active_tracks, refine_feats):
@@ -231,7 +235,11 @@ def run_mot(video_path, detector, tracker, extractor=None, refiner=None, extract
 
     cap.release()
     end = time.time()
-    print(f"\n[MOT] Done — {frame_idx} frames, {len(all_tracks)} tracks, {(end-start):.2f} seconds")
+    total = end - start
+    normal = total - total_extract
+    
+    print(f"\n[MOT] Done — {frame_idx} frames, {len(all_tracks)} tracks")
+    print(f"[MOT] Normal time:{(normal):.2f} seconds, extract (refiner) time: {total_extract:.2f} seconds")
     return all_tracks
 
 
