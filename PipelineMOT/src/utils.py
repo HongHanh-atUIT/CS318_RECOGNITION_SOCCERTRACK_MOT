@@ -36,7 +36,7 @@ def _color(track_id: int):
 
 def visualize_tracks(video_path: str,
                      all_tracks: Dict,
-                     output_path: str = "output_tracked.avi",  # ← Dùng .avi
+                     output_path: str = "output_tracked.avi",
                      show_id: bool = True,
                      thickness: int = 2,
                      font_scale: float = 0.7):
@@ -50,11 +50,10 @@ def visualize_tracks(video_path: str,
     height = int(cap.get(cv2.CAP_PROP_FRAME_HEIGHT))
     total = int(cap.get(cv2.CAP_PROP_FRAME_COUNT))
 
-    # Buộc dùng AVI + MJPG (tương thích cao nhất với Windows)
     if not output_path.lower().endswith('.avi'):
         output_path = output_path.rsplit('.', 1)[0] + '.avi'
 
-    fourcc = cv2.VideoWriter_fourcc(*'MJPG')      # Codec dễ mở nhất
+    fourcc = cv2.VideoWriter_fourcc(*'MJPG')
     writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
     if not writer.isOpened():
@@ -62,7 +61,6 @@ def visualize_tracks(video_path: str,
         fourcc = cv2.VideoWriter_fourcc(*'XVID')
         writer = cv2.VideoWriter(output_path, fourcc, fps, (width, height))
 
-    # Xây frame map
     frame_map: Dict[int, Dict[int, List]] = {}
     for tid, data in all_tracks.items():
         for fi, box in enumerate(data.get('boxes', [])):
@@ -104,26 +102,26 @@ def visualize_tracks(video_path: str,
     writer.release()
     print(f"✅ Đã lưu xong: {output_path}")
     print("   → Hãy thử mở file này bằng Windows Media Player")
+
     
 def refine(all_tracks, refiner):
     return refiner.refine(all_tracks)
+
         
-    
-def run_mot(video_path, detector, tracker, extractor=None, refiner = None, extractor_refine = None):
+def run_mot(video_path, detector, tracker, extractor=None, refiner=None, extractor_refine=None):
     """
     Chạy full MOT pipeline cho một video.
  
     Parameters
     ----------
-    video_path : str
-    detector   : object với method .detect(frame) → [[x1,y1,x2,y2,conf], ...]
-    tracker    : Tracker instance
-    extractor  : object với method .extract(crop) → np.ndarray (L2-normalised), dùng cho online tracking
-    refiner    : (optional) object với .refine(all_tracks) → refined_tracks
-                 Nếu None, trả về all_tracks trực tiếp.
-    extractor_refine: (optional) object với method .extract(crop) → np.ndarray
+    video_path       : str
+    detector         : object với method .detect(frame) → [[x1,y1,x2,y2,conf], ...]
+    tracker          : Tracker instance
+    extractor        : object với method .extract_batch(crops) → list[np.ndarray]
+                       dùng cho online tracking
+    refiner          : (optional) object với .refine(all_tracks) → refined_tracks
+    extractor_refine : (optional) object với method .extract_batch(crops) → list[np.ndarray]
                        Extractor riêng để tạo embedding cho refinement.
-                       Nếu None nhưng refiner được truyền vào → dùng chung với online tracking
  
     Returns
     -------
@@ -132,25 +130,21 @@ def run_mot(video_path, detector, tracker, extractor=None, refiner = None, extra
             track_id (int): {
                 'boxes' : list — box [x1,y1,x2,y2] hoặc None theo từng frame,
                 'frames': list — frame_idx tương ứng (chỉ các frame có box)
-                'feat'  : list - feature tương ứng (nếu dùng refiner)
+                'feats' : list — feature tương ứng (nếu dùng refiner)
             }
         }
     """
-    
     cap = cv2.VideoCapture(video_path)
     if not cap.isOpened():
         raise IOError(f"Không mở được video: {video_path}")
-    
-    # all_tracks[track_id]['boxes'][i] = box tại frame i, hoặc None nếu không có
-    all_tracks: Dict[int, Dict] = {} 
 
-    frame_idx = 0   # 0-based index để index vào list
-    frame_id  = 1   # 1-based id truyền vào tracker (convention của STrack)
-    
-    # extract cả khi không dùng refiner, để tiện không chạy lại pipeline khi áp dụng refiner
-    need_refine_feat = extractor_refine is not None  
-    
-    # Duyệt qua từng frame 
+    all_tracks: Dict[int, Dict] = {}
+
+    frame_idx = 0
+    frame_id  = 1
+
+    need_refine_feat = extractor_refine is not None
+
     start = time.time()
     while True:
         ret, frame = cap.read()
@@ -158,79 +152,88 @@ def run_mot(video_path, detector, tracker, extractor=None, refiner = None, extra
             break
 
         print(f"Processing frame {frame_idx}")
-        
-        # Bước 2.1: Detect
-        detections = detector.detect(frame) # Trả về list các box và conf [[x1, y1, x2, y2, conf]]
-        
-        # Bước 2.2: Crop + Feature
-        enriched_detections = [] # Tổng hợp box, conf, feature tại frame đang xét của các object
+
+        # ── Bước 2.1: Detect ────────────────────────────────────────────
+        detections = detector.detect(frame)  # [[x1, y1, x2, y2, conf], ...]
+
+        # ── Bước 2.2: Crop tất cả detection trong frame ─────────────────
+        valid_dets  = []   # detection sau khi lọc crop rỗng
+        det_crops   = []   # crops tương ứng (cho online extractor)
+
         for det in detections:
-            enriched = {}
             x1, y1, x2, y2 = map(int, det[:-1])
             score = float(det[4])
-            
-            crop = frame[y1:y2, x1:x2]
-
+            crop  = frame[y1:y2, x1:x2]
             if crop.size == 0:
                 continue
+            valid_dets.append({'tlbr': [float(x1), float(y1), float(x2), float(y2)],
+                                'score': score})
+            det_crops.append(crop)
 
-            # 2.2.1 Extract feature
-            feature = extractor.extract(crop) if extractor is not None else None
+        # ── Bước 2.3: Batch feature extraction (online) ─────────────────
+        if extractor is not None and det_crops:
+            online_feats = extractor.extract_batch(det_crops)   # list[np.ndarray]
+        else:
+            online_feats = [None] * len(valid_dets)
 
-            # 2.2.2 attach feature
-            enriched_detections.append({
-                'tlbr' : [float(x1), float(y1), float(x2), float(y2)],
-                'score': score,
-                'feat' : feature,
-            })
+        enriched_detections = []
+        for det_info, feat in zip(valid_dets, online_feats):
+            enriched_detections.append({**det_info, 'feat': feat})
 
-        # Bước 2.3: Tracking
-        active_tracks  = tracker.update(enriched_detections, frame_id) 
-         
-        # Lưu all_tracks
-        # Với các track_id mới: chèn None cho tất cả frame trước đó
+        # ── Bước 2.4: Tracking ──────────────────────────────────────────
+        active_tracks = tracker.update(enriched_detections, frame_id)
+
+        # ── Bước 2.5: Batch feature extraction (refinement) ─────────────
+        # Chỉ crop lại từ active tracks (có thể khác với detection crops
+        # do tracker dùng Kalman smoothing / predicted box).
+        if need_refine_feat and active_tracks:
+            refine_crops = []
+            for track in active_tracks:
+                x1, y1, x2, y2 = map(int, track.tlbr)
+                crop = frame[y1:y2, x1:x2]
+                # fallback nếu crop rỗng (box nằm sát biên)
+                refine_crops.append(crop if crop.size > 0 else frame[0:1, 0:1])
+
+            refine_feats = extractor_refine.extract_batch(refine_crops)  # list[np.ndarray]
+        else:
+            refine_feats = [None] * len(active_tracks)
+
+        # ── Bước 2.6: Lưu all_tracks ────────────────────────────────────
         active_ids = set()
-        for track in active_tracks:
+        for track, ref_feat in zip(active_tracks, refine_feats):
             tid = track.track_id
             active_ids.add(tid)
- 
+
             if tid not in all_tracks:
-                # Track mới → fill None cho các frame trước
                 entry = {
                     'boxes' : [None] * frame_idx,
                     'frames': [],
                 }
                 if need_refine_feat:
-                    entry['feats'] = []         # chỉ khởi tạo khi cần refinement
+                    entry['feats'] = []
                 all_tracks[tid] = entry
- 
-            box = track.tlbr.tolist()   # [x1,y1,x2,y2] 
+
+            box = track.tlbr.tolist()
             all_tracks[tid]['boxes'].append(box)
             all_tracks[tid]['frames'].append(frame_idx)
- 
-            # Nếu cần refine:
+
             if need_refine_feat:
-                x1, y1, x2, y2 = map(int, track.tlbr)
-                # Clamp để tránh ra ngoài biên frame
-                crop = frame[y1:y2, x1:x2]
-                feat = extractor_refine.extract(crop) if crop.size > 0 \
-                    else extractor_refine.extract(frame[0:1, 0:1])  # fallback crop rỗng
-                all_tracks[tid]['feats'].append(feat)
-                    
-        # Track đã có trong dict nhưng không active frame này → None
+                all_tracks[tid]['feats'].append(ref_feat)
+
+        # Track đã có nhưng không active frame này → None
         for tid, data in all_tracks.items():
             if tid not in active_ids:
-                # Chỉ thêm None nếu track chưa có entry cho frame này
                 if len(data['boxes']) == frame_idx:
                     data['boxes'].append(None)
- 
+
         frame_idx += 1
         frame_id  += 1
-        
+
     cap.release()
     end = time.time()
     print(f"\n[MOT] Done — {frame_idx} frames, {len(all_tracks)} tracks, {(end-start):.2f} seconds")
     return all_tracks
+
 
 def run_pipeline(
     video_path:        str,
@@ -238,13 +241,13 @@ def run_pipeline(
     detector,
     tracker_name:      str,
     output_path:       str,
-    extractor=None,                # online extractor (DeepEIoU dùng, ByteTrack bỏ qua)
-    input_tracks = None,             # tận dụng lại all_tracks đã chạy không refiner
+    extractor=None,
+    input_tracks=None,
     refiner=None,
-    refiner_extractor=None,        # extractor cho GTALink
+    refiner_extractor=None,
     iou_thresh:        float = 0.5,
     tracker_kwargs:    Optional[Dict] = None,
-    visualize = False,
+    visualize=False,
     **viz_kwargs
 ) -> Dict:
     """
@@ -263,54 +266,48 @@ def run_pipeline(
     iou_thresh        : IoU threshold để tính metrics
     tracker_kwargs    : kwargs truyền vào tracker constructor
     visualize         : Nếu True -> lưu video visualize
-    input_tracks      : list các track là output của pipeline MOT không refiner, dùng để tối ưu thời gian, không chạy lại pipeline MOT
+    input_tracks      : kết quả MOT sẵn có (bỏ qua bước chạy lại pipeline)
 
     Returns
     -------
     dict với all_tracks và metrics
     """
-    
     if tracker_name in ('strongsort', 'deepeiou') and extractor is None:
         raise ValueError(
             f"Tracker '{tracker_name}' yêu cầu appearance extractor. "
             f"Vui lòng truyền extractor != None."
         )
-        
+
     tracker_kwargs = tracker_kwargs or {}
     tracker        = Tracker(algorithm=tracker_name, **tracker_kwargs)
     ref_name = refiner_extractor.backend if refiner_extractor is not None else \
                (extractor.backend if extractor is not None else 'None')
-               
+
     if input_tracks is None:
         print("===== Chưa có kết quả MOT - Chạy toàn bộ pipeline ======")
-        # Bước 1-2: MOT không chạy refiner, có trích xuất đặc trưng vào all_tracks nếu refiner = True
         all_tracks = run_mot(
-            video_path      = video_path,
-            detector        = detector,
-            tracker         = tracker,
-            extractor       = extractor,
-            refiner         = refiner,
-            extractor_refine= refiner_extractor,
+            video_path       = video_path,
+            detector         = detector,
+            tracker          = tracker,
+            extractor        = extractor,
+            refiner          = refiner,
+            extractor_refine = refiner_extractor,
         )
-        # Bước 3: Offline refinement
         if refiner is not None:
             print(f"[OFFLINE TRACKER] Đang refine output bằng GTALink với extractor là {ref_name}")
             all_tracks = refine(all_tracks, refiner)
     else:
         print("===== Đã có kết quả MOT - Tái sử dụng ======")
-        # Bước 3: Offline refinement
         start = time.time()
         if refiner is not None:
             print(f"[OFFLINE TRACKER] Đang refine output bằng GTALink với extractor là {ref_name}")
-            all_tracks = refine(input_tracks, refiner)   #all_tracks có feat nhưng bỏ feat sau output refiner
+            all_tracks = refine(input_tracks, refiner)
             end = time.time()
             print(f"[OFFLINE TRACKER] Hoàn tất sau {(end-start):.2f} seconds.")
         else:
-            all_tracks = input_tracks   # Nếu không dùng refiner dùng trực tiếp input track để tính các bước tiếp theo
-
+            all_tracks = input_tracks
 
     if visualize:
-        # Bước 4: Visualize
         visualize_tracks(
             video_path  = video_path,
             all_tracks  = all_tracks,
@@ -318,7 +315,6 @@ def run_pipeline(
             **viz_kwargs,
         )
 
-    # Tính metrics
     metrics = compute_metrics(
         all_tracks = all_tracks,
         csv_path   = gt_csv_path,
