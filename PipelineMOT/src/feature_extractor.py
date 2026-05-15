@@ -115,16 +115,25 @@ class FeatureExtractor:
         return self._extract_deep(crop)
 
     # ------------------------------------------------------------------ #
-    #  Batch extraction                #
+    #  Batch extraction (MỚI – dùng trong pipeline chính)                 #
     # ------------------------------------------------------------------ #
 
-    def extract_batch(self, crops: list[np.ndarray]) -> list[np.ndarray]:
+    # batch_size mặc định theo backend: SOLIDER nặng hơn OSNet
+    _DEFAULT_BATCH_SIZE = {
+        "osnet"           : 128,
+        "solider"         : 64,
+        "color_histogram" : 200,
+    }
+
+    def extract_batch(self, crops: list[np.ndarray], batch_size: int = None) -> list[np.ndarray]:
         """
         Trích xuất đặc trưng cho nhiều crop cùng lúc (batch inference).
 
         Args:
-            crops: list các ảnh BGR numpy array (H, W, 3)
-                   Có thể rỗng → trả về list rỗng.
+            crops      : list các ảnh BGR numpy array (H, W, 3)
+            batch_size : số crops tối đa mỗi lần forward. None → dùng default
+                         theo backend (osnet=64, solider=32).
+                         Giới hạn này tránh CUDA OOM khi có quá nhiều detections.
         Returns:
             list các feature vector 1D float32, cùng thứ tự với crops.
         """
@@ -134,27 +143,34 @@ class FeatureExtractor:
         if self.backend == "color_histogram":
             return [self._extract_color_histogram(c) for c in crops]
 
-        # Deep backends: OSNet / SOLIDER
+        if batch_size is None:
+            batch_size = self._DEFAULT_BATCH_SIZE.get(self.backend, 32)
+
         transform = (
             self._OSNET_TRANSFORM if self.backend == "osnet"
             else self._SOLIDER_TRANSFORM
         )
 
-        # Preprocess tất cả crops thành 1 batch tensor (N, 3, H, W)
-        tensors = []
-        for crop in crops:
-            img = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
-            tensors.append(transform(img))
-        batch = torch.stack(tensors).to(self.device)   # (N, 3, H, W)
+        all_feats = []
+        for i in range(0, len(crops), batch_size):
+            chunk = crops[i : i + batch_size]
 
-        with torch.no_grad():
-            if self.backend == "osnet":
-                feats = self.model(batch)               # (N, 512)
-            elif self.backend == "solider":
-                feats, _ = self.model(batch, semantic_weight=None)  # (N, D)
+            tensors = [
+                transform(Image.fromarray(cv2.cvtColor(c, cv2.COLOR_BGR2RGB)))
+                for c in chunk
+            ]
+            batch = torch.stack(tensors).to(self.device)   # (B, 3, H, W)
 
-        feats = F.normalize(feats, p=2, dim=1)         # L2 normalize theo row
-        return [f.cpu().numpy().astype(np.float32) for f in feats]
+            with torch.no_grad():
+                if self.backend == "osnet":
+                    feats = self.model(batch)               # (B, 512)
+                elif self.backend == "solider":
+                    feats, _ = self.model(batch, semantic_weight=None)  # (B, D)
+
+            feats = F.normalize(feats, p=2, dim=1)
+            all_feats.extend(f.cpu().numpy().astype(np.float32) for f in feats)
+
+        return all_feats
 
     # ------------------------------------------------------------------ #
     #  Internal single-image helpers                                       #
