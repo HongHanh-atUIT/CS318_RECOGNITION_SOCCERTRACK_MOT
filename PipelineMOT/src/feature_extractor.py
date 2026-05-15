@@ -40,13 +40,6 @@ class FeatureExtractor:
         solider_arch: str = "swin_small",
         solider_semantic_weight: float = 0.2,
     ):
-        """
-        Args:
-            backend                 : "osnet" | "solider" | "color_histogram"
-            device                  : "cuda" | "cpu" | None (tự detect)
-            solider_config_path     : đường dẫn config .yml của SOLIDER-REID
-            solider_semantic_weight : semantic weight cho SOLIDER
-        """
         self.backend = backend
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
         self.model = None
@@ -97,7 +90,6 @@ class FeatureExtractor:
         missing, unexpected = swin.load_state_dict(new_state_dict, strict=False)
         print(f"Missing: {len(missing)} | Unexpected: {len(unexpected)}")
 
-        # FIX: gọi trực tiếp, không gán lại
         swin.eval()
         swin.to(self.device)
 
@@ -107,23 +99,66 @@ class FeatureExtractor:
         print(f"[FeatureExtractor] Feature dim: {self.feat_dim}")
         
     # ------------------------------------------------------------------ #
-    #  Feature extraction                                                  #
+    #  Single-image extraction (giữ lại để tương thích ngược)             #
     # ------------------------------------------------------------------ #
 
     def extract(self, crop: np.ndarray) -> np.ndarray:
         """
-        Trích xuất đặc trưng từ ảnh crop người.
-
+        Trích xuất đặc trưng từ 1 ảnh crop.
         Args:
             crop: ảnh BGR numpy array (H, W, 3)
         Returns:
-            feature vector 1D float32:
-              osnet / solider   → 512 / 768-dim, L2-normalized
-              color_histogram   → 512-dim, L2-normalized
+            feature vector 1D float32
         """
         if self.backend == "color_histogram":
             return self._extract_color_histogram(crop)
         return self._extract_deep(crop)
+
+    # ------------------------------------------------------------------ #
+    #  Batch extraction                #
+    # ------------------------------------------------------------------ #
+
+    def extract_batch(self, crops: list[np.ndarray]) -> list[np.ndarray]:
+        """
+        Trích xuất đặc trưng cho nhiều crop cùng lúc (batch inference).
+
+        Args:
+            crops: list các ảnh BGR numpy array (H, W, 3)
+                   Có thể rỗng → trả về list rỗng.
+        Returns:
+            list các feature vector 1D float32, cùng thứ tự với crops.
+        """
+        if not crops:
+            return []
+
+        if self.backend == "color_histogram":
+            return [self._extract_color_histogram(c) for c in crops]
+
+        # Deep backends: OSNet / SOLIDER
+        transform = (
+            self._OSNET_TRANSFORM if self.backend == "osnet"
+            else self._SOLIDER_TRANSFORM
+        )
+
+        # Preprocess tất cả crops thành 1 batch tensor (N, 3, H, W)
+        tensors = []
+        for crop in crops:
+            img = Image.fromarray(cv2.cvtColor(crop, cv2.COLOR_BGR2RGB))
+            tensors.append(transform(img))
+        batch = torch.stack(tensors).to(self.device)   # (N, 3, H, W)
+
+        with torch.no_grad():
+            if self.backend == "osnet":
+                feats = self.model(batch)               # (N, 512)
+            elif self.backend == "solider":
+                feats, _ = self.model(batch, semantic_weight=None)  # (N, D)
+
+        feats = F.normalize(feats, p=2, dim=1)         # L2 normalize theo row
+        return [f.cpu().numpy().astype(np.float32) for f in feats]
+
+    # ------------------------------------------------------------------ #
+    #  Internal single-image helpers                                       #
+    # ------------------------------------------------------------------ #
 
     def _extract_deep(self, crop: np.ndarray) -> np.ndarray:
         transform = (
@@ -134,7 +169,7 @@ class FeatureExtractor:
 
         with torch.no_grad():
             if self.backend == "osnet":
-                feat = self.model(inp)          # (1, 512)
+                feat = self.model(inp)
             elif self.backend == "solider":
                 return self._extract_solider(crop)
 
