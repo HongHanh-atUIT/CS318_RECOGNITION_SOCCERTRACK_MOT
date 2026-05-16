@@ -150,8 +150,9 @@ def run_mot(video_path, detector, tracker, extractor=None, refiner=None, extract
         ret, frame = cap.read()
         if not ret:
             break
-
-        print(f"Processing frame {frame_idx}")
+        
+        if frame_idx %50 == 0:
+            print(f"Processing frame {frame_idx}")
 
         # ── Bước 2.1: Detect ────────────────────────────────────────────
         detections = detector.detect(frame)  # [[x1, y1, x2, y2, conf], ...]
@@ -240,23 +241,13 @@ def run_mot(video_path, detector, tracker, extractor=None, refiner=None, extract
     
     print(f"\n[MOT] Done — {frame_idx} frames, {len(all_tracks)} tracks")
     print(f"[MOT] Normal time:{(normal):.2f} seconds, extract (refiner) time: {total_extract:.2f} seconds")
-    return all_tracks
+    return all_tracks, normal, total_extract  # <-- trả thêm 2 giá trị
 
 
 def run_pipeline(
-    video_path:        str,
-    gt_csv_path:       str,
-    detector,
-    tracker_name:      str,
-    output_path:       str,
-    extractor=None,
-    input_tracks=None,
-    refiner=None,
-    refiner_extractor=None,
-    iou_thresh:        float = 0.5,
-    tracker_kwargs:    Optional[Dict] = None,
-    visualize=False,
-    **viz_kwargs
+    video_path, gt_csv_path, detector, tracker_name, output_path,
+    extractor=None, input_tracks=None, refiner=None, refiner_extractor=None,
+    iou_thresh=0.5, tracker_kwargs=None, visualize=False, **viz_kwargs
 ) -> Dict:
     """
     Chạy full pipeline MOT và tính metrics cho 1 video.
@@ -291,27 +282,67 @@ def run_pipeline(
     ref_name = refiner_extractor.backend if refiner_extractor is not None else \
                (extractor.backend if extractor is not None else 'None')
 
+    normal_time  = 0.0
+    extract_time = 0.0
+    gta_time     = 0.0
+
     if input_tracks is None:
         print("===== Chưa có kết quả MOT - Chạy toàn bộ pipeline ======")
-        all_tracks = run_mot(
+        all_tracks, normal_time, extract_time = run_mot(
             video_path       = video_path,
             detector         = detector,
             tracker          = tracker,
             extractor        = extractor,
-            refiner          = refiner,
+            refiner          = None,
             extractor_refine = refiner_extractor,
         )
         if refiner is not None:
-            print(f"[OFFLINE TRACKER] Đang refine output bằng GTALink với extractor là {ref_name}")
+            print(f"[OFFLINE TRACKER] Đang refine bằng GTALink với extractor {ref_name}")
+            t0 = time.time()
             all_tracks = refine(all_tracks, refiner)
+            gta_time   = time.time() - t0
     else:
         print("===== Đã có kết quả MOT - Tái sử dụng ======")
-        start = time.time()
         if refiner is not None:
-            print(f"[OFFLINE TRACKER] Đang refine output bằng GTALink với extractor là {ref_name}")
+            t0 = time.time()  # ← bắt đầu đo TRƯỚC khi extract
+
+            # Kiểm tra tracks có feats chưa, nếu chưa thì extract lại
+            sample_tid = next(iter(input_tracks))
+            if 'feats' not in input_tracks[sample_tid]:
+                print(f"[OFFLINE TRACKER] Tracks chưa có feats, đang extract bằng {ref_name}...")
+                cap = cv2.VideoCapture(video_path)
+                for tid in input_tracks:
+                    input_tracks[tid]['feats'] = []
+
+                frame_idx = 0
+                while True:
+                    ret, frame = cap.read()
+                    if not ret:
+                        break
+
+                    active_tids = []
+                    crops = []
+                    for tid, data in input_tracks.items():
+                        boxes = data['boxes']
+                        if frame_idx < len(boxes) and boxes[frame_idx] is not None:
+                            x1, y1, x2, y2 = map(int, boxes[frame_idx])
+                            crop = frame[y1:y2, x1:x2]
+                            active_tids.append(tid)
+                            crops.append(crop if crop.size > 0 else frame[0:1, 0:1])
+
+                    if crops:
+                        feats = refiner_extractor.extract_batch(crops)
+                        for tid, feat in zip(active_tids, feats):
+                            input_tracks[tid]['feats'].append(feat)
+
+                    frame_idx += 1
+                cap.release()
+                print(f"[OFFLINE TRACKER] Extract xong feats cho {len(input_tracks)} tracks.")
+
+            print(f"[OFFLINE TRACKER] Đang refine bằng GTALink với extractor {ref_name}")
             all_tracks = refine(input_tracks, refiner)
-            end = time.time()
-            print(f"[OFFLINE TRACKER] Hoàn tất sau {(end-start):.2f} seconds.")
+            gta_time   = time.time() - t0  # ← bao gồm cả extract + refine
+            print(f"[OFFLINE TRACKER] Hoàn tất sau {gta_time:.2f}s.")
         else:
             all_tracks = input_tracks
 
@@ -329,4 +360,10 @@ def run_pipeline(
         iou_thresh = iou_thresh,
     )
 
-    return {'all_tracks': all_tracks, 'metrics': metrics}
+    return {
+        'all_tracks'  : all_tracks,
+        'metrics'     : metrics,
+        'normal_time' : normal_time,
+        'extract_time': extract_time,
+        'gta_time'    : gta_time,
+    }
