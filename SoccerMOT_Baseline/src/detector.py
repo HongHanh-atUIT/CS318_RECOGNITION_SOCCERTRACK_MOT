@@ -5,7 +5,7 @@ detector.py — YOLOv5 detector (hub + ultralytics).
 import torch
 import numpy as np
 from typing import List, Tuple
-
+import os
 
 class Detector:
 
@@ -33,7 +33,8 @@ class Detector:
     def _load_yolov5_hub(self, model_path: str):
         import warnings, logging
         logging.getLogger("yolov5").setLevel(logging.ERROR)
-        YOLOV5_REPO = r"D:\UITs subject\Năm 3\Nhận dạng\SoccerMOT_Baseline\yolov5"
+        YOLOV5_REPO = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "yolov5")
+
         with warnings.catch_warnings():
             warnings.simplefilter("ignore")
             self.model = torch.hub.load(

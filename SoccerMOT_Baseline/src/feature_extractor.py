@@ -23,7 +23,16 @@ class FeatureExtractor:
         if self.backend != "osnet":
             raise ValueError(f"Unknown backend '{backend}'. Only 'osnet' is supported.")
 
-        from .osnet import osnet_x1_0, osnet_x0_75, osnet_x0_5, osnet_x0_25
+        import importlib.util, sys, os
+        _osnet_path = os.path.join(os.path.dirname(os.path.abspath(__file__)), "osnet.py")
+        _spec = importlib.util.spec_from_file_location("bl_osnet", _osnet_path)
+        _osnet_mod = importlib.util.module_from_spec(_spec)
+        sys.modules["bl_osnet"] = _osnet_mod
+        _spec.loader.exec_module(_osnet_mod)
+        osnet_x1_0, osnet_x0_75, osnet_x0_5, osnet_x0_25 = (
+            _osnet_mod.osnet_x1_0, _osnet_mod.osnet_x0_75,
+            _osnet_mod.osnet_x0_5, _osnet_mod.osnet_x0_25,
+        )
 
         self.device = ("cuda" if torch.cuda.is_available() else "cpu") \
                       if device == "auto" else device

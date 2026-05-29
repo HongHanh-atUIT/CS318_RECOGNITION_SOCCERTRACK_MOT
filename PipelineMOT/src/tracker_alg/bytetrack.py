@@ -182,6 +182,11 @@ class STrack(BaseTrack):
     def tlwh(self) -> np.ndarray:
         if self.mean is None:
             return self._tlwh.copy()
+        if self.use_project:
+            # mean = [x, y, vx, vy] pitch coords → dùng last_wh để giữ w, h
+            cx, cy_bottom = inverse_homography(self.mean[:2])  # TODO: implement
+            w, h = self.last_wh
+            return np.array([cx - w/2, cy_bottom - h, w, h])
         ret    = self.mean[:4].copy()
         ret[2] = ret[2] * ret[3]
         ret[:2] -= ret[2:] / 2
