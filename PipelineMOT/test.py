@@ -13,22 +13,22 @@ from src.utils import *
 # Path & Config
 # ============================================================
 
-# BASE = r"D:\UITs subject\Năm 3\Nhận dạng\CS318_RECOGNITION_SOCCERTRACK_MOT"
-BASE = r"D:\UIT 3rd year\NhanDang\Project"
+# Thư mục gốc của repo (tự suy ra từ vị trí file này, không cần sửa tay)
+BASE = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 
 # models
-YOLO_PATH    = os.path.join(BASE, r"PipelineMOT\models\best_yolo26.pt")
-RF_PATH      = os.path.join(BASE, r"PipelineMOT\models\best_rf_detr.pth")
-SOLIDER_PATH = os.path.join(BASE, r"PipelineMOT\models\swin_small_converted.pth")
+YOLO_PATH    = os.path.join(BASE, "PipelineMOT", "models", "best_yolo26.pt")
+RF_PATH      = os.path.join(BASE, "PipelineMOT", "models", "best_rf_detr.pth")
+SOLIDER_PATH = os.path.join(BASE, "PipelineMOT", "models", "swin_small_converted.pth")
 
 # data
-VIDEOS_DIR      = r"D:\UIT 3rd year\NhanDang\Project\Data\wide_view\videos"
-GROUNDTRUTH_DIR = r"D:\UIT 3rd year\NhanDang\Project\Data\wide_view\annotations"
+VIDEOS_DIR      = os.path.join(BASE, "Data", "wide_view", "videos")
+GROUNDTRUTH_DIR = os.path.join(BASE, "Data", "wide_view", "annotations")
 ALL_VIDEOS      = sorted(os.listdir(VIDEOS_DIR))
 ALL_VIDEOS      = ALL_VIDEOS[-6:]
 
 # output
-OUTPUT_DIR = os.path.join(BASE, r"Output")
+OUTPUT_DIR = os.path.join(BASE, "Output")
 os.makedirs(OUTPUT_DIR, exist_ok=True)
 
 # all config

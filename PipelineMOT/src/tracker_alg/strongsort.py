@@ -6,7 +6,7 @@ import lap
 
 from .basetrack import BaseTrack, TrackState
 from .kalman_filter import KalmanFilter, KalmanFilterXY
-from src.pitch_localization import box_to_pitch_xy, pitch_xy_to_bottom_center, tlwh_from_pitch_xy
+from ..pitch_localization import box_to_pitch_xy, pitch_xy_to_bottom_center, tlwh_from_pitch_xy
 
 # Chi-square 0.95 quantile
 CHI2INV95_4 = 9.4877   # 4 DOF — xyah space

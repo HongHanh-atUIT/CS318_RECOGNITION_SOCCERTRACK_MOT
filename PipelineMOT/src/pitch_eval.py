@@ -8,8 +8,8 @@ import cv2
 from scipy.optimize import linear_sum_assignment
 from typing import Dict, List, Optional, Sequence
 
-from src.compute_metrics import load_gt_from_csv
-from src.pitch_localization import box_to_pitch_xy
+from .compute_metrics import load_gt_from_csv
+from .pitch_localization import box_to_pitch_xy
 
 FRAMES_PER_CLIP = 750
 CLIP_REAL_FPS   = 30.0          # 750 frame ↔ 25 s thời gian thực

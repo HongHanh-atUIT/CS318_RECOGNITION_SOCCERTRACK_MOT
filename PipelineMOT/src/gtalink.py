@@ -460,7 +460,8 @@ def _all_tracks_to_tracklets(all_tracks):
  
         scores = [1.0] * len(frames)   # score không dùng trong GTALink → để 1.0
  
-        tracklets[tid] = Tracklet(tid, frames, scores, bboxes_xywh, feats=feats)
+        # list(...) → bản sao: merge dùng `+=` nên không được sửa vào all_tracks đầu vào
+        tracklets[tid] = Tracklet(tid, list(frames), scores, bboxes_xywh, feats=list(feats))
     return tracklets
  
 

@@ -11,3 +11,5 @@ Pillow
 tqdm
 scikit-learn
 scipy
+imageio
+matplotlib

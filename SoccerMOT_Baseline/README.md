@@ -1,144 +1,57 @@
-# SoccerMOT Baseline
+# SoccerMOT Baseline — YOLOv5 → OSNet → DeepSORT
 
-**Pipeline:** YOLOv5 detect → OSNet feature → Pitch localization → Tracker (ByteTrack / StrongSORT / OC-SORT)
+Baseline used for comparison in the E2ESoTrack paper (Table 4 & Table 5).
 
----
+| Variant | Detector weights | Backend |
+|---|---|---|
+| **Baseline** | `yolov5m.pt` (COCO pretrained) | `yolov5_hub` (local `yolov5/` repo via `torch.hub`) |
+| **Baseline (trained)** | `best.pt` (YOLOv5 retrained on SoccerTrack) | `yolov5` (ultralytics) |
 
-## Cấu trúc folder
+Both variants share the same OSNet-x1.0 appearance model and the same modified DeepSORT
+(`TRACKER_KWARGS` in `main.ipynb`: `use_project=True, n_init=1, track_high_thresh=0.6,
+new_track_thresh=0.65, max_age=60, max_cosine_distance=0.4, max_iou_distance=0.7`).
+
+## Layout
 
 ```
 SoccerMOT_Baseline/
-├── run_baseline.py              ← File chạy chính
-├── src/
-│   ├── __init__.py
-│   ├── pitch_localization.py   ← Bước 1: ánh xạ box → [x,y] pitch
-│   ├── detector.py             ← YOLOv5 wrapper (tải pretrained tự động)
-│   ├── feature_extractor.py    ← OSNet wrapper  (tải pretrained tự động)
-│   ├── tracker.py              ← Wrapper thống nhất cho tất cả tracker
-│   ├── osnet.py                ← Copy từ PipelineMOT/src/osnet.py
-│   └── tracker_alg/
-│       ├── __init__.py
-│       ├── basetrack.py
-│       ├── kalman_filter.py    ← KalmanFilter (8D) + KalmanFilterXY (4D)
-│       ├── bytetrack.py        ← ByteTrack + use_project
-│       ├── strongsort.py       ← StrongSORT + use_project
-│       └── ocsort.py           ← OC-SORT + use_project
-├── models/                     ← Đặt best_yolo26.pt vào đây (hoặc dùng pretrained)
-└── output/                     ← Video output tự tạo
+├── main.ipynb              # run baseline on test set + GNSS clips, compute metrics
+├── plot_keypoints.ipynb    # visualise homography keypoints on the wide-view frame
+├── yolov5/                 # (not tracked) clone of ultralytics/yolov5 for torch.hub
+└── src/
+    ├── detector.py         # YOLOv5 wrapper (yolov5_hub | yolov5)
+    ├── feature_extractor.py# OSNet wrapper (weights auto-downloaded with gdown)
+    ├── osnet.py
+    ├── tracker.py          # DeepSORT wrapper
+    ├── tracker_alg/        # basetrack, kalman_filter (8D + 4D pitch), deepsort
+    ├── pitch_localization.py
+    ├── compute_metrics.py  # MOTA / MOTP / IDF1 / HOTA
+    ├── utils.py            # run_pipeline(...)
+    └── models/             # (not tracked) yolov5m.pt, best.pt
 ```
-
----
 
 ## Setup
 
-### Bước 1: Copy osnet.py từ PipelineMOT
 ```bash
-copy PipelineMOT\src\osnet.py  SoccerMOT_Baseline\src\osnet.py
+git clone https://github.com/ultralytics/yolov5 SoccerMOT_Baseline/yolov5
+pip install -r SoccerMOT_Baseline/yolov5/requirements.txt
 ```
 
-### Bước 2: Chỉnh đường dẫn trong run_baseline.py
-Mở `run_baseline.py`, chỉnh 3 biến đầu file:
+Put `yolov5m.pt` and `best.pt` in `SoccerMOT_Baseline/src/models/`.
+
+## Run
+
+Open `main.ipynb` with `SoccerMOT_Baseline/` as working directory (imports use `src.*`), set `BASE`
+to the repository root, then run the cells in order:
+
+1. **Components** — detectors, OSNet, `TRACKER_KWARGS`.
+2. **Pitch-localisation clips** — runs both baselines on the six GNSS clips (`ALL_VIDEOS[24:30]`)
+   and saves `Output/pitch_eval/tracks_baseline*.pkl`, consumed by `PipelineMOT/eval_pitch.py`.
+3. **Test set** — runs on `ALL_VIDEOS[-6:]` and averages MOTA / IDF1 / HOTA.
+
+Output format of `run_pipeline(...)["all_tracks"]` is identical to `PipelineMOT`:
+
 ```python
-BASE       = r"D:\UITs subject\..."   # thư mục gốc project
-YOLO_PATH  = os.path.join(BASE, r"PipelineMOT\models\best_yolo26.pt")
-VIDEO_PATH = os.path.join(BASE, r"Data\wide_view\videos\F_20220220_1_1800_1830.mp4")
-GT_CSV     = os.path.join(BASE, r"Data\wide_view\annotations\F_20220220_1_1800_1830.csv")
+{track_id: {"boxes": [None | [x1, y1, x2, y2], ...],   # one entry per frame
+            "frames": [frame_idx, ...]}}
 ```
-
-### Bước 3: Install dependencies
-```bash
-pip install torch torchvision opencv-python lap gdown ultralytics scipy
-```
-
----
-
-## Cách chạy
-
-### Chạy mặc định (StrongSORT + use_project=True)
-```bash
-cd SoccerMOT_Baseline
-python run_baseline.py
-```
-
-### Các tùy chọn
-```bash
-# ByteTrack, không dùng pitch projection
-python run_baseline.py --tracker bytetrack
-
-# StrongSORT với pitch projection
-python run_baseline.py --tracker strongsort --use_project
-
-# OC-SORT với pitch projection, chỉnh threshold
-python run_baseline.py --tracker ocsort --use_project --distance_threshold 0.1
-
-# Dùng pretrained YOLOv5s thay vì file custom
-python run_baseline.py --yolo yolov5s
-```
-
----
-
-## Giải thích các bước pipeline
-
-```
-Bước 1: Pitch Localization
-  box [x1,y1,x2,y2] → bottom-center (bx, by) → normalize → [x,y] ∈ [0,1]²
-  File: src/pitch_localization.py
-
-Bước 2: Kalman Filter cải tiến
-  State gốc : [cx, cy, a, h, vx, vy, va, vh]  (8D, bị nhiễu bởi aspect ratio)
-  State mới : [x,  y,  dx, dy]                 (4D, tọa độ sân, ý nghĩa vật lý)
-  File: src/tracker_alg/kalman_filter.py → KalmanFilterXY
-
-Bước 3: Load pretrained
-  YOLOv5  : torch.hub hoặc ultralytics (tự tải nếu không có file local)
-  OSNet   : gdown từ Google Drive (tự tải vào ~/.cache/torch/checkpoints/)
-
-Bước 4: Pipeline chính
-  detect (YOLOv5) → extract (OSNet) → pitch_xy (box_to_pitch_xy) → track
-```
-
----
-
-## So sánh use_project True vs False
-
-| | `use_project=False` | `use_project=True` |
-|---|---|---|
-| Kalman state | `[cx,cy,a,h,vx,vy,va,vh]` 8D | `[x,y,dx,dy]` 4D |
-| Distance | IoU | Euclidean (normalize) |
-| Mahalanobis gating | chi²(4) = 9.49 | chi²(2) = 5.99 |
-| Homography | Không | Tùy chọn (dùng normalize nếu chưa có) |
-
----
-
-## Điều chỉnh distance_threshold
-
-Khi `use_project=True` và **chưa có homography** (coordinate [0,1]²):
-
-| Giá trị | Tương đương pixel (frame 1920px) |
-|---|---|
-| `0.05` | ~96px |
-| `0.10` | ~192px ← thử trước |
-| `0.15` | ~288px (default) |
-| `0.20` | ~384px |
-
-Khi có **homography** (coordinate tính bằng meter):
-```python
-H = np.load("homography.npy")
-# truyền vào run_baseline():
-run_baseline(..., H=H, tracker_kwargs={"distance_threshold": 3.0})
-```
-
----
-
-## Output format
-
-`all_tracks` cùng format với PipelineMOT gốc:
-```python
-{
-    track_id: {
-        'boxes' : [None, [x1,y1,x2,y2], None, ...],  # None = frame không có box
-        'frames': [frame_idx, ...]
-    }
-}
-```
-→ Dùng thẳng `compute_metrics()` từ PipelineMOT để so sánh.

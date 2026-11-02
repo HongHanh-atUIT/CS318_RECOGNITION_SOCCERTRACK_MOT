@@ -145,7 +145,7 @@ if __name__ == "__main__":
     import sys
 
     kp_path = sys.argv[1] if len(sys.argv) > 1 else \
-        r"D:\UITs subject\Năm 3\Nhận dạng\CS318_RECOGNITION_SOCCERTRACK_MOT\Data\fisheye_keypoints.json"
+        str(Path(__file__).resolve().parents[2] / "Data" / "fisheye_keypoints.json")
 
     if not Path(kp_path).exists():
         print(f"File không tìm thấy: {kp_path}")
