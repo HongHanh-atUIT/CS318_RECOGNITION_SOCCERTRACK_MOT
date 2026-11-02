@@ -7,7 +7,7 @@
 **Thi Hong Hanh Pham · Phuong Nam Nguyen · Viet Hang Duong**<br>
 University of Information Technology, VNU-HCM, Ho Chi Minh City, Vietnam
 
-*Accepted at CSoNet 2026 — The 15th International Conference on Computational Science and Network Intelligence (Springer LNCS)*
+*Accepted at CSoNet 2026, The 15th International Conference on Computational Science and Network Intelligence (Springer LNCS)*
 
 ![Python](https://img.shields.io/badge/Python-3.10+-3776AB?logo=python&logoColor=white)
 ![PyTorch](https://img.shields.io/badge/PyTorch-CUDA-EE4C2C?logo=pytorch&logoColor=white)
@@ -53,7 +53,7 @@ flowchart LR
 
 ## Results
 
-### Multi-object tracking — test set (6 videos, 1800–1980 s)
+### Multi-object tracking on the test set (6 videos, 1800–1980 s)
 
 | Pipeline | Configuration | MOTA ↑ | IDF1 ↑ | HOTA ↑ | IDs ↓ | FP ↓ | FN ↓ |
 |---|---|:-:|:-:|:-:|:-:|:-:|:-:|
@@ -87,11 +87,10 @@ E2ESoTrack beats both baselines on both metrics in all six videos.
 ├── PipelineMOT/                 # E2ESoTrack (main method)
 │   ├── demo.py                  # ★ raw video → tracking → 2D tactical-map video
 │   ├── demo.ipynb               # ★ step-by-step walkthrough of demo.py (with outputs)
-│   ├── test.py                  # benchmark runner on the test set (MOT metrics)
+│   ├── analysis.ipynb           # ★ why each module: detector / extractor / tracker / GTA comparisons
+│   ├── test.ipynb               # benchmark runner: every detector × extractor × tracker × GTA (Tables 1–4)
 │   ├── save_pitch_tracks.py     # tracks on the 6 GNSS clips → Output/pitch_eval/
 │   ├── eval_pitch.py            # pitch localization vs GNSS (Table 5)
-│   ├── main.ipynb, test.ipynb   # experiment notebooks used for the paper
-│   ├── Visualize.ipynb          # 2D tactical-map rendering, optimal pipeline vs baseline
 │   ├── models/                  # (not tracked) best_yolo26.pt, best_rf_detr.pth, swin_small_converted.pth
 │   └── src/
 │       ├── detector.py          # YOLO26 | RF-DETR
@@ -105,7 +104,8 @@ E2ESoTrack beats both baselines on both metrics in all six videos.
 │       ├── compute_metrics.py        # MOTA / MOTP / IDF1 / HOTA
 │       ├── pitch_eval.py             # GNSS alignment, Pitch-HOTA, E_1:1
 │       └── utils.py                  # run_mot / run_pipeline
-├── SoccerMOT_Baseline/          # YOLOv5 → OSNet → DeepSORT baseline (see its README)
+├── SoccerMOT_Baseline/          # YOLOv5 → OSNet → DeepSORT baseline + analysis.ipynb (see its README)
+├── results/                     # all numbers behind the paper tables (CSV, per video)
 ├── Training/                    # train_yolo26.py, train_rfdetr.py, train_yolo5.py, Tunning.ipynb
 ├── PrepareData/                 # SoccerTrack → YOLO detection / Re-ID crops
 ├── assets/                      # figures for this README
@@ -188,8 +188,9 @@ Options: `--config fast` skips GTA. `--tracks <file.pkl>` re-renders saved track
 
 | Result | How |
 |---|---|
-| Tables 1–4 (MOT, test set) | `PipelineMOT/test.ipynb` (or `python PipelineMOT/test.py`) runs `Testing(...)` for every detector / extractor / tracker / GTA combination and writes `Output/result_*.txt` |
+| Tables 1–4 (MOT, test set) | `PipelineMOT/test.ipynb` runs `Testing(...)` for every detector / extractor / tracker / GTA combination and writes `Output/result_*.txt`. The numbers obtained for the paper are in `results/mot_test_per_video.csv` |
 | Baselines | `SoccerMOT_Baseline/main.ipynb` |
+| Module-by-module analysis | `PipelineMOT/analysis.ipynb` (E2ESoTrack) and `SoccerMOT_Baseline/analysis.ipynb` (baseline) read `results/` and add small diagnostic experiments (recall vs player size, embedding separability, GTA effect) |
 | Table 5 (pitch vs GNSS) | 1. `python PipelineMOT/save_pitch_tracks.py` saves E2ESoTrack tracks on clips 720–900 s (`Output/pitch_eval/tracks_e2e_{fast,best}.pkl`). The baseline tracks (`tracks_baseline*.pkl`) come from `SoccerMOT_Baseline/main.ipynb`<br>2. `python PipelineMOT/eval_pitch.py` prints the table and writes `pitch_eval.csv` / `pitch_eval_per_video.csv` |
 | Detector training | `Training/train_yolo26.py`, `Training/train_rfdetr.py`, `Training/train_yolo5.py`; data prepared by `PrepareData/` |
 

@@ -1,0 +1,6 @@
+Pipeline,Pitch-HOTA,E_1to1,E_frame
+Oracle (GT boxes),64.09,3.53,3.47
+Baseline,16.34,5.34,4.86
+Baseline (trained),35.22,6.01,3.83
+YOLO26 + ByteTrack,47.6,4.8,3.89
+YOLO26 + ByteTrack + GTA,48.88,4.53,3.89

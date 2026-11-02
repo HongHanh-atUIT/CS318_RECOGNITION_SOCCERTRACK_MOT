@@ -1,4 +1,4 @@
-# SoccerMOT Baseline — YOLOv5 → OSNet → DeepSORT
+# SoccerMOT Baseline: YOLOv5 → OSNet → DeepSORT
 
 Baseline used for comparison in the E2ESoTrack paper (Table 4 & Table 5).
 
@@ -16,6 +16,7 @@ new_track_thresh=0.65, max_age=60, max_cosine_distance=0.4, max_iou_distance=0.7
 ```
 SoccerMOT_Baseline/
 ├── main.ipynb              # run baseline on test set + GNSS clips, compute metrics
+├── analysis.ipynb          # why the baseline is weak: detection recall, ID switches, GNSS accuracy
 ├── plot_keypoints.ipynb    # visualise homography keypoints on the wide-view frame
 ├── yolov5/                 # (not tracked) clone of ultralytics/yolov5 for torch.hub
 └── src/
@@ -44,10 +45,10 @@ Put `yolov5m.pt` and `best.pt` in `SoccerMOT_Baseline/src/models/`.
 Open `main.ipynb` with `SoccerMOT_Baseline/` as working directory (imports use `src.*`), set `BASE`
 to the repository root, then run the cells in order:
 
-1. **Components** — detectors, OSNet, `TRACKER_KWARGS`.
-2. **Pitch-localisation clips** — runs both baselines on the six GNSS clips (`ALL_VIDEOS[24:30]`)
+1. **Components**: detectors, OSNet, `TRACKER_KWARGS`.
+2. **Pitch-localisation clips**: runs both baselines on the six GNSS clips (`ALL_VIDEOS[24:30]`)
    and saves `Output/pitch_eval/tracks_baseline*.pkl`, consumed by `PipelineMOT/eval_pitch.py`.
-3. **Test set** — runs on `ALL_VIDEOS[-6:]` and averages MOTA / IDF1 / HOTA.
+3. **Test set**: runs on `ALL_VIDEOS[-6:]` and averages MOTA / IDF1 / HOTA.
 
 Output format of `run_pipeline(...)["all_tracks"]` is identical to `PipelineMOT`:
 
