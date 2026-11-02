@@ -1,6 +1,4 @@
-import sys
 from pathlib import Path
-sys.path.insert(0, str(Path(__file__).parent))  
 
 import torch
 import torch.nn.functional as F
@@ -8,7 +6,7 @@ import torchvision.transforms as T
 import cv2
 import numpy as np
 from PIL import Image
-from osnet import osnet_x1_0
+from .osnet import osnet_x1_0
 
 
 class FeatureExtractor:
@@ -59,7 +57,7 @@ class FeatureExtractor:
         print(f"[FeatureExtractor] OSNet loaded on {self.device}")
 
     def _load_solider(self, model_path: str, arch: str, semantic_weight: float):
-        from swin_transformer import (
+        from .swin_transformer import (
             swin_tiny_patch4_window7_224,
             swin_small_patch4_window7_224,
             swin_base_patch4_window7_224,

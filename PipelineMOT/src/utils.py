@@ -1,6 +1,6 @@
-from src.compute_metrics import compute_metrics
+from .compute_metrics import compute_metrics
 from typing import List, Dict, Optional
-from src.tracker import Tracker
+from .tracker import Tracker
 import time
 import cv2
 

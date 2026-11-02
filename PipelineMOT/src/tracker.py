@@ -34,16 +34,16 @@ class Tracker:
         if algo == 'deepeiou':
             if use_project:
                 raise ValueError("Deep EIOU không thể sử dụng phép chiếu! Sử dụng Deep EIOU mặc định")
-            from tracker_alg.deepeiou import DeepEIoU
+            from .tracker_alg.deepeiou import DeepEIoU
             self._tracker = DeepEIoU(**kwargs)
         elif algo == 'bytetrack':
-            from tracker_alg.bytetrack import ByteTrack
+            from .tracker_alg.bytetrack import ByteTrack
             self._tracker = ByteTrack(**kwargs)
         elif algo == 'strongsort':
-            from tracker_alg.strongsort import StrongSort
+            from .tracker_alg.strongsort import StrongSort
             self._tracker = StrongSort(**kwargs)
         elif algo == 'ocsort':
-            from tracker_alg.ocsort import OCSort
+            from .tracker_alg.ocsort import OCSort
             self._tracker = OCSort(**kwargs)
         else:
             raise ValueError(

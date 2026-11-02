@@ -17,7 +17,7 @@ use_project=True:
 import numpy as np
 from typing import Optional
 from scipy.optimize import linear_sum_assignment
-from src.pitch_localization import box_to_pitch_xy, pitch_xy_to_bottom_center
+from ..pitch_localization import box_to_pitch_xy, pitch_xy_to_bottom_center
 
 # =============================================================================
 # STrack — Wrapper output để tương thích với pipeline
